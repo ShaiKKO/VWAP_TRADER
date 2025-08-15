@@ -26,17 +26,17 @@ void setup_signal_handlers() {
     sa.sa_handler = signal_handler;
     sigemptyset(&sa.sa_mask);
     sa.sa_flags = 0;
-    
+
     sigaction(SIGINT, &sa, nullptr);
     sigaction(SIGTERM, &sa, nullptr);
-    
+
     #ifdef SIGPIPE
     signal(SIGPIPE, SIG_IGN);
     #endif
 }
 
 void print_usage(const char* program_name) {
-    std::cerr << "Usage: " << program_name 
+    std::cerr << "Usage: " << program_name
               << " <symbol> <side> <max_order_size> <vwap_window_seconds>"
               << " <market_data_ip> <market_data_port>"
               << " <order_ip> <order_port>" << std::endl;
@@ -58,62 +58,56 @@ bool parse_arguments(int argc, char* argv[], Config& config) {
         std::cerr << "Error: Invalid number of arguments (expected 8, got " << (argc - 1) << ")" << std::endl;
         return false;
     }
-    
-    // Parse symbol
+
     config.symbol = argv[1];
     if (config.symbol.empty() || config.symbol.length() > 8) {
         std::cerr << "Error: Symbol must be 1-8 characters" << std::endl;
         return false;
     }
-    
-    // Parse side
+
     if (std::strlen(argv[2]) != 1 || (argv[2][0] != 'B' && argv[2][0] != 'S')) {
         std::cerr << "Error: Side must be 'B' or 'S'" << std::endl;
         return false;
     }
     config.side = argv[2][0];
-    
-    // Parse max order size
+
     char* endptr;
     config.maxOrderSize = std::strtoul(argv[3], &endptr, 10);
     if (*endptr != '\0' || config.maxOrderSize == 0 || config.maxOrderSize > 1000000) {
         std::cerr << "Error: Max order size must be a positive integer (1-1000000)" << std::endl;
         return false;
     }
-    
-    // Parse VWAP window seconds
+
     config.vwapWindowSeconds = std::strtoul(argv[4], &endptr, 10);
     if (*endptr != '\0' || config.vwapWindowSeconds == 0 || config.vwapWindowSeconds > 3600) {
         std::cerr << "Error: VWAP window must be between 1 and 3600 seconds" << std::endl;
         return false;
     }
-    
-    // Parse market data host and port
+
     config.marketDataHost = argv[5];
     if (config.marketDataHost.empty()) {
         std::cerr << "Error: Invalid market data IP address" << std::endl;
         return false;
     }
-    
+
     config.marketDataPort = std::strtoul(argv[6], &endptr, 10);
     if (*endptr != '\0' || config.marketDataPort == 0 || config.marketDataPort > 65535) {
         std::cerr << "Error: Market data port must be between 1 and 65535" << std::endl;
         return false;
     }
-    
-    // Parse order host and port
+
     config.orderHost = argv[7];
     if (config.orderHost.empty()) {
         std::cerr << "Error: Invalid order server IP address" << std::endl;
         return false;
     }
-    
+
     config.orderPort = std::strtoul(argv[8], &endptr, 10);
     if (*endptr != '\0' || config.orderPort == 0 || config.orderPort > 65535) {
         std::cerr << "Error: Order port must be between 1 and 65535" << std::endl;
         return false;
     }
-    
+
     return true;
 }
 
@@ -138,18 +132,17 @@ void print_startup_banner() {
 }
 
 int main(int argc, char* argv[]) {
-    // Parse command-line arguments
     Config config;
     if (!parse_arguments(argc, argv, config)) {
         print_usage(argv[0]);
         return 1;
     }
-    
+
     print_startup_banner();
     print_config(config);
-    
+
     setup_signal_handlers();
-    
+
     try {
         std::cout << "Initializing Order Manager..." << std::endl;
         OrderManager orderManager(
@@ -158,44 +151,43 @@ int main(int argc, char* argv[]) {
             config.maxOrderSize,
             config.vwapWindowSeconds
         );
-        
+
         std::cout << "Initializing Network Manager..." << std::endl;
         NetworkManager networkManager;
-        
+
         if (!networkManager.initialize(config)) {
             std::cerr << "Failed to initialize network connections" << std::endl;
             std::cerr << "Please check that the market data and order servers are running" << std::endl;
             return 1;
         }
-        
+
         std::cout << "Network connections established successfully" << std::endl;
-        
+
         uint64_t totalQuotes = 0;
         uint64_t totalTrades = 0;
         uint64_t totalOrders = 0;
         auto startTime = std::chrono::steady_clock::now();
         auto lastStatsTime = startTime;
-        
+
         networkManager.setQuoteCallback([&](const QuoteMessage& quote) {
-            if (std::strncmp(quote.symbol, config.symbol.c_str(), 
+            if (std::strncmp(quote.symbol, config.symbol.c_str(),
                            std::min(sizeof(quote.symbol), config.symbol.length())) != 0) {
                 return;
             }
-            
+
             totalQuotes++;
-            
+
             Optional<OrderMessage> orderOpt = orderManager.processQuote(quote);
-            
+
             if (orderOpt.has_value()) {
                 OrderMessage order = orderOpt.value();
-                
+
                 if (networkManager.sendOrder(order)) {
                     totalOrders++;
-                    
-                    // Log order details
+
                     char symbolStr[9] = {0};
                     std::memcpy(symbolStr, order.symbol, 8);
-                    
+
                     std::cout << "[ORDER SENT] "
                               << (order.side == 'B' ? "BUY" : "SELL")
                               << " " << order.quantity
@@ -209,25 +201,22 @@ int main(int argc, char* argv[]) {
                 }
             }
         });
-        
-        // Setup trade callback
+
         networkManager.setTradeCallback([&](const TradeMessage& trade) {
-            // Filter by symbol
             if (std::strncmp(trade.symbol, config.symbol.c_str(),
                            std::min(sizeof(trade.symbol), config.symbol.length())) != 0) {
                 return;
             }
-            
+
             totalTrades++;
-            
-            // Process trade through OrderManager
+
             orderManager.processTrade(trade);
-            
+
             // Log VWAP updates periodically
             if (totalTrades % 10 == 0) {
                 double currentVwap = orderManager.getCurrentVwap();
                 if (currentVwap > 0) {
-                    std::cout << "[VWAP UPDATE] Current VWAP: $" 
+                    std::cout << "[VWAP UPDATE] Current VWAP: $"
                               << std::fixed << std::setprecision(2)
                               << (currentVwap / 100.0)
                               << " (after " << totalTrades << " trades)"
@@ -235,78 +224,70 @@ int main(int argc, char* argv[]) {
                 }
             }
         });
-        
+
         std::cout << "\n=== Trading System Started ===" << std::endl;
         std::cout << "Waiting for market data..." << std::endl;
         std::cout << "System will be ready to trade after first VWAP window completes" << std::endl;
-        
-        // Main event loop
+
         while (!g_shutdown_requested) {
-            // Process network events
             networkManager.processEvents();
-            
-            // Print periodic statistics (every 30 seconds)
+
             auto now = std::chrono::steady_clock::now();
             auto timeSinceLastStats = std::chrono::duration_cast<std::chrono::seconds>(
                 now - lastStatsTime).count();
-            
+
             if (timeSinceLastStats >= 30) {
                 lastStatsTime = now;
-                
+
                 auto uptime = std::chrono::duration_cast<std::chrono::seconds>(
                     now - startTime).count();
-                
+
                 std::cout << "\n[STATS] Uptime: " << uptime << "s"
                           << " | Quotes: " << totalQuotes
                           << " | Trades: " << totalTrades
                           << " | Orders: " << totalOrders;
-                
+
                 if (orderManager.isReadyToTrade()) {
                     std::cout << " | Status: READY";
                 } else {
                     std::cout << " | Status: WAITING";
                 }
-                
+
                 double currentVwap = orderManager.getCurrentVwap();
                 if (currentVwap > 0) {
                     std::cout << " | VWAP: $" << std::fixed << std::setprecision(2)
                               << (currentVwap / 100.0);
                 }
-                
+
                 std::cout << std::endl;
             }
         }
-        
-        // Graceful shutdown
+
         std::cout << "\n=== Shutting Down ===" << std::endl;
-        
-        // Stop network connections
+
         networkManager.stop();
-        
-        // Print final statistics
+
         auto uptime = std::chrono::duration_cast<std::chrono::seconds>(
             std::chrono::steady_clock::now() - startTime).count();
-        
+
         std::cout << "\n=== Final Statistics ===" << std::endl;
         std::cout << "Total Runtime: " << uptime << " seconds" << std::endl;
         std::cout << "Total Quotes Processed: " << totalQuotes << std::endl;
         std::cout << "Total Trades Processed: " << totalTrades << std::endl;
         std::cout << "Total Orders Sent: " << totalOrders << std::endl;
-        
+
         if (totalQuotes > 0) {
             double orderRate = (100.0 * totalOrders) / totalQuotes;
             std::cout << "Order Rate: " << std::fixed << std::setprecision(2)
                       << orderRate << "%" << std::endl;
         }
-        
-        // Print OrderManager statistics
+
         orderManager.printStatistics();
-        
-        // Print order history
+
         if (totalOrders > 0) {
             orderManager.printOrderHistory(10);
         }
-        
+
     } catch (const std::exception& e) {
         std::cerr << "\n[FATAL ERROR] " << e.what() << std::endl;
         return 1;
@@ -314,7 +295,7 @@ int main(int argc, char* argv[]) {
         std::cerr << "\n[FATAL ERROR] Unknown exception occurred" << std::endl;
         return 1;
     }
-    
+
     std::cout << "\nShutdown complete. Goodbye!" << std::endl;
     return 0;
 }

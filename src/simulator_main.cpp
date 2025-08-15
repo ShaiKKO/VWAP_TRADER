@@ -17,18 +17,16 @@ int main(int argc, char* argv[]) {
     // Set up signal handlers
     signal(SIGINT, signalHandler);
     signal(SIGTERM, signalHandler);
-    
-    // Parse command line arguments
+
     SimulatorConfig config = parseCommandLine(argc, argv);
-    
-    // Create and start simulator
+
     MarketDataSimulator simulator(config);
-    
+
     std::cout << "Starting Market Data Simulator\n"
               << "  Port: " << config.port << "\n"
               << "  Symbol: " << config.symbol << "\n"
               << "  Scenario: ";
-    
+
     switch (config.scenario) {
         case MarketScenario::STEADY:
             std::cout << "Steady";
@@ -46,33 +44,32 @@ int main(int argc, char* argv[]) {
             std::cout << "CSV Replay";
             break;
     }
-    
+
     std::cout << "\n  Base Price: $" << config.basePrice
               << "\n  Rate: " << config.messagesPerSecond << " msgs/sec"
               << "\n  Duration: ";
-    
+
     if (config.duration == 0) {
         std::cout << "Infinite (press Ctrl+C to stop)";
     } else {
         std::cout << config.duration << " seconds";
     }
-    
+
     std::cout << "\n\n";
-    
+
     if (!simulator.start()) {
         std::cerr << "Failed to start simulator" << std::endl;
         return 1;
     }
-    
+
     std::cout << "Simulator is running. Waiting for connections..." << std::endl;
-    
-    // Wait for shutdown signal or duration to expire
+
     while (!shouldExit.load() && simulator.isRunning()) {
         usleep(100000); // 100ms
     }
-    
+
     simulator.stop();
     std::cout << "Simulator stopped." << std::endl;
-    
+
     return 0;
 }
