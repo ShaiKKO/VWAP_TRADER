@@ -1,0 +1,112 @@
+# Build artifacts
+*.o
+*.a
+*.so
+*.dylib
+bin/
+obj/
+build/
+
+# Backup files
+*.bak
+*~
+*.swp
+*.swo
+*.orig
+
+# IDE files
+.vscode/
+.idea/
+*.xcodeproj/
+*.xcworkspace/
+.DS_Store
+
+# Documentation files (except README.md)
+*.md
+!README.md
+docs/
+documentation/
+*.pdf
+*.docx
+*.doc
+
+# Test directory
+tests/
+test/
+
+# Temporary files
+*.tmp
+*.temp
+tmp/
+temp/
+
+# Log files
+*.log
+logs/
+
+# Core dumps
+core
+core.*
+*.core
+
+# Tar/zip archives
+*.tar
+*.tar.gz
+*.tar.bz2
+*.zip
+*.rar
+
+# Debug files
+*.dSYM/
+*.su
+*.idb
+*.pdb
+
+# Profiling
+*.gcov
+*.gcda
+*.gcno
+gmon.out
+
+# Package files
+*.deb
+*.rpm
+*.dmg
+*.pkg
+
+# Editor backups
+.#*
+\#*#
+
+# Python cache (if any scripts)
+__pycache__/
+*.pyc
+*.pyo
+
+# CMake (if used)
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile.cmake
+
+# Dependencies
+.deps/
+.depend
+
+# Output files
+*.out
+output/
+
+# Valgrind
+*.valgrind
+callgrind.out.*
+
+# Coverage
+*.gcov
+coverage/
+*.info
+
+# Benchmark results
+benchmark_results/
+perf.data
+perf.data.old
