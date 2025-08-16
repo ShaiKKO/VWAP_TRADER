@@ -6,7 +6,7 @@
 #include <iomanip>
 #include <sstream>
 
-CSVReader::CSVReader(const std::string& path) 
+CSVReader::CSVReader(const std::string& path)
     : filePath(path), currentIndex(0), isLoaded(false),
       readBuffer(std::make_unique<char[]>(BUFFER_SIZE)) {
     records.reserve(INITIAL_RESERVE);
@@ -18,15 +18,15 @@ bool CSVReader::loadFile() {
         std::cerr << "Failed to open CSV file: " << filePath << std::endl;
         return false;
     }
-    
+
     file.rdbuf()->pubsetbuf(readBuffer.get(), BUFFER_SIZE);
-    
+
     std::string line;
     bool headerParsed = false;
-    
+
     while (std::getline(file, line)) {
         if (line.empty() || line[0] == '#') continue;
-        
+
         if (!headerParsed) {
             if (!parseHeader(line)) {
                 std::cerr << "Failed to parse CSV header" << std::endl;
@@ -35,16 +35,16 @@ bool CSVReader::loadFile() {
             headerParsed = true;
             continue;
         }
-        
+
         MarketDataRecord record;
         if (parseLine(line, record)) {
             records.push_back(std::move(record));
         }
     }
-    
+
     file.close();
     isLoaded = true;
-    
+
     std::cout << "Loaded " << records.size() << " records from " << filePath << std::endl;
     return !records.empty();
 }
@@ -65,13 +65,13 @@ bool CSVReader::parseHeader(const std::string& line) {
 bool CSVReader::parseLine(const std::string& line, MarketDataRecord& record) {
     auto fields = splitCSV(line);
     if (fields.size() < 3) return false;
-    
+
     record.timestamp = parseTimestamp(fields[0]);
-    
+
     if (fields[1] == "Q" || fields[1] == "QUOTE") {
         record.type = MarketDataRecord::QUOTE;
         if (fields.size() < 7) return false;
-        
+
         record.symbol = fields[2];
         record.quote.bidPrice = parsePrice(fields[3]);
         record.quote.bidQuantity = parseQuantity(fields[4]);
@@ -80,24 +80,24 @@ bool CSVReader::parseLine(const std::string& line, MarketDataRecord& record) {
     } else if (fields[1] == "T" || fields[1] == "TRADE") {
         record.type = MarketDataRecord::TRADE;
         if (fields.size() < 5) return false;
-        
+
         record.symbol = fields[2];
         record.trade.price = parsePrice(fields[3]);
         record.trade.quantity = parseQuantity(fields[4]);
     } else {
         return false;
     }
-    
+
     return true;
 }
 
 std::vector<std::string> CSVReader::splitCSV(const std::string& line) {
     std::vector<std::string> fields;
     fields.reserve(8);
-    
+
     std::string field;
     bool inQuotes = false;
-    
+
     for (char c : line) {
         if (c == '"') {
             inQuotes = !inQuotes;
@@ -108,16 +108,16 @@ std::vector<std::string> CSVReader::splitCSV(const std::string& line) {
             field += c;
         }
     }
-    
+
     if (!field.empty()) {
         fields.push_back(std::move(field));
     }
-    
+
     for (auto& f : fields) {
         f.erase(0, f.find_first_not_of(" \t"));
         f.erase(f.find_last_not_of(" \t") + 1);
     }
-    
+
     return fields;
 }
 
@@ -127,12 +127,12 @@ uint64_t CSVReader::parseTimestamp(const std::string& timeStr) {
         char sep;
         std::istringstream iss(timeStr);
         iss >> hours >> sep >> minutes >> sep >> seconds;
-        
+
         if (timeStr.find('.') != std::string::npos) {
             iss >> sep >> millis;
         }
-        
-        uint64_t totalMillis = hours * 3600000ULL + minutes * 60000ULL + 
+
+        uint64_t totalMillis = hours * 3600000ULL + minutes * 60000ULL +
                                seconds * 1000ULL + millis;
         return totalMillis * 1000000ULL;
     } else {
@@ -173,30 +173,35 @@ T CSVReader::parseValue(const std::string& str, T defaultValue) const noexcept {
 QuoteMessage CSVReader::convertToQuoteMessage(const MarketDataRecord& record) const {
     QuoteMessage msg;
     std::memset(&msg, 0, sizeof(msg));
-    
-    std::strncpy(msg.symbol, record.symbol.c_str(), 
-                 std::min(sizeof(msg.symbol), record.symbol.length()));
+
+    std::memset(msg.symbol, 0, sizeof(msg.symbol));
+    std::memcpy(msg.symbol, record.symbol.c_str(),
+                std::min(sizeof(msg.symbol), record.symbol.length()));
     msg.timestamp = record.timestamp;
     msg.bidPrice = static_cast<int32_t>(record.quote.bidPrice * 100);
     msg.bidQuantity = record.quote.bidQuantity;
     msg.askPrice = static_cast<int32_t>(record.quote.askPrice * 100);
     msg.askQuantity = record.quote.askQuantity;
-    
+
     return msg;
 }
 
 TradeMessage CSVReader::convertToTradeMessage(const MarketDataRecord& record) const {
     TradeMessage msg;
     std::memset(&msg, 0, sizeof(msg));
-    
+
     msg.timestamp = record.timestamp;
-    std::strncpy(msg.symbol, record.symbol.c_str(), 
-                 std::min(sizeof(msg.symbol), record.symbol.length()));
+
+    std::memset(msg.symbol, 0, sizeof(msg.symbol));
+    std::memcpy(msg.symbol, record.symbol.c_str(),
+                std::min(sizeof(msg.symbol), record.symbol.length()));
     msg.quantity = record.trade.quantity;
     msg.price = static_cast<int32_t>(record.trade.price * 100);
-    
+
     return msg;
 }
+
+constexpr std::chrono::microseconds CSVReplayEngine::MIN_INTERVAL;
 
 CSVReplayEngine::CSVReplayEngine(std::unique_ptr<CSVReader> csvReader, double speed)
     : reader(std::move(csvReader)), baseTimestamp(0), replaySpeed(speed),
@@ -217,33 +222,33 @@ bool CSVReplayEngine::getNextMessage(MarketDataRecord& record) {
     if (!reader || isPaused || currentPosition >= reader->size()) {
         return false;
     }
-    
+
     const auto& nextRecord = reader->getRecords()[currentPosition];
-    
+
     if (shouldEmitNow(nextRecord)) {
         record = nextRecord;
         currentPosition++;
         lastEmitTime = std::chrono::steady_clock::now();
         return true;
     }
-    
+
     return false;
 }
 
 bool CSVReplayEngine::shouldEmitNow(const MarketDataRecord& record) const {
     if (replaySpeed <= 0) return true;
-    
+
     auto now = std::chrono::steady_clock::now();
     auto timeSinceLastEmit = now - lastEmitTime;
-    
+
     if (timeSinceLastEmit < MIN_INTERVAL) {
         return false;
     }
-    
+
     uint64_t elapsedMicros = getElapsedMicros();
     uint64_t recordOffset = record.timestamp - baseTimestamp;
     uint64_t scaledOffset = static_cast<uint64_t>(recordOffset / replaySpeed);
-    
+
     return elapsedMicros >= scaledOffset;
 }
 

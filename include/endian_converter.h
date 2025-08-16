@@ -12,6 +12,8 @@
     #define IS_LITTLE_ENDIAN 0
 #endif
 
+static_assert(IS_LITTLE_ENDIAN, "This code requires a little-endian platform");
+
 class EndianConverter {
 public:
     static inline constexpr uint16_t ltoh16(uint16_t value) noexcept {
@@ -21,7 +23,7 @@ public:
             return ((value & 0xFF00) >> 8) | ((value & 0x00FF) << 8);
         #endif
     }
-    
+
     static inline constexpr uint32_t ltoh32(uint32_t value) noexcept {
         #if IS_LITTLE_ENDIAN
             return value;
@@ -32,7 +34,7 @@ public:
                    ((value & 0x000000FF) << 24);
         #endif
     }
-    
+
     static inline constexpr uint64_t ltoh64(uint64_t value) noexcept {
         #if IS_LITTLE_ENDIAN
             return value;
@@ -47,26 +49,26 @@ public:
                    ((value & 0x00000000000000FFULL) << 56);
         #endif
     }
-    
+
     static inline constexpr int32_t ltoh32_signed(int32_t value) noexcept {
         return static_cast<int32_t>(ltoh32(static_cast<uint32_t>(value)));
     }
-    
+
     static inline constexpr uint16_t htol16(uint16_t value) noexcept {
         return ltoh16(value);
     }
-    
+
     static inline constexpr uint32_t htol32(uint32_t value) noexcept {
         return ltoh32(value);
     }
-    
+
     static inline constexpr uint64_t htol64(uint64_t value) noexcept {
         return ltoh64(value);
     }
-    
+
     static inline constexpr int32_t htol32_signed(int32_t value) noexcept {
         return static_cast<int32_t>(htol32(static_cast<uint32_t>(value)));
     }
 };
 
-#endif // ENDIAN_CONVERTER_H
+#endif

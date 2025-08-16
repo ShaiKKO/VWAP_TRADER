@@ -9,7 +9,6 @@
 #include "vwap_calculator.h"
 #include "order_manager.h"
 #include "message_buffer.h"
-#include "optimized_types.h"
 #include "memory_pool.h"
 #include "circular_buffer.h"
 
@@ -31,11 +30,11 @@ private:
         double p99LatencyUs;
         double maxLatencyUs;
         size_t totalMessages;
-        double throughput;  // messages per second
+        double throughput;
     };
 
 public:
-    PerformanceBenchmark() : rng(42) {  // Fixed seed for reproducibility
+    PerformanceBenchmark() : rng(42) {
         generateTestData();
     }
 
@@ -45,7 +44,6 @@ public:
         std::cout << "           Benchmark Results" << std::endl;
         std::cout << "=========================================" << std::endl;
 
-        // VWAP Calculator benchmarks
         std::cout << "\n1. VWAP CALCULATOR PERFORMANCE" << std::endl;
         std::cout << "-------------------------------" << std::endl;
 
@@ -53,7 +51,6 @@ public:
 
         printResult("VWAP Calculation", vwapResult);
 
-        // Order Manager benchmarks
         std::cout << "\n2. ORDER MANAGER PERFORMANCE" << std::endl;
         std::cout << "-----------------------------" << std::endl;
 
@@ -61,13 +58,11 @@ public:
 
         printResult("Order Processing", orderResult);
 
-        // Memory allocation benchmarks
         std::cout << "\n3. MEMORY ALLOCATION PERFORMANCE" << std::endl;
         std::cout << "---------------------------------" << std::endl;
 
         benchmarkMemoryAllocations();
 
-        // End-to-end latency
         std::cout << "\n4. END-TO-END LATENCY" << std::endl;
         std::cout << "----------------------" << std::endl;
 
@@ -87,7 +82,7 @@ private:
         uint64_t timestamp = 1000000000000ULL;
 
         for (size_t i = 0; i < NUM_MESSAGES; ++i) {
-            // Generate quote
+
             QuoteMessage quote;
             std::strcpy(quote.symbol, "IBM");
             quote.timestamp = timestamp;
@@ -97,7 +92,6 @@ private:
             quote.askPrice = quote.bidPrice + 10;
             testQuotes.push_back(quote);
 
-            // Generate trade
             TradeMessage trade;
             std::strcpy(trade.symbol, "IBM");
             trade.timestamp = timestamp;
@@ -114,12 +108,10 @@ private:
         std::vector<double> latencies;
         latencies.reserve(NUM_MESSAGES);
 
-        // Warmup
         for (size_t i = 0; i < WARMUP_MESSAGES; ++i) {
             calculator.addTrade(testTrades[i]);
         }
 
-        // Benchmark
         auto startTotal = high_resolution_clock::now();
 
         for (size_t i = WARMUP_MESSAGES; i < NUM_MESSAGES; ++i) {
@@ -131,7 +123,6 @@ private:
             double latencyUs = duration<double, std::micro>(end - start).count();
             latencies.push_back(latencyUs);
 
-            // Prevent optimization
             volatile double dummy = vwap;
             (void)dummy;
         }
@@ -146,12 +137,10 @@ private:
         std::vector<double> latencies;
         latencies.reserve(NUM_MESSAGES);
 
-        // Warmup
         for (size_t i = 0; i < WARMUP_MESSAGES; ++i) {
             calculator.addTrade(testTrades[i]);
         }
 
-        // Benchmark
         auto startTotal = high_resolution_clock::now();
 
         for (size_t i = WARMUP_MESSAGES; i < NUM_MESSAGES; ++i) {
@@ -177,7 +166,6 @@ private:
         std::vector<double> latencies;
         latencies.reserve(NUM_MESSAGES);
 
-        // Add some trades first
         for (size_t i = 0; i < 100; ++i) {
             manager.processTrade(testTrades[i]);
         }
@@ -234,35 +222,11 @@ private:
         auto end = high_resolution_clock::now();
         double dynamicTimeUs = duration<double, std::micro>(end - start).count();
 
-        SimplePool<MessageBuffer256, 1024> pool;
-        start = high_resolution_clock::now();
-        for (size_t i = 0; i < NUM_ALLOCS; ++i) {
-            MessageBuffer256* buf = pool.allocate();
-            pool.deallocate(buf);
-        }
-        end = high_resolution_clock::now();
-        double poolTimeUs = duration<double, std::micro>(end - start).count();
-
-        start = high_resolution_clock::now();
-        for (size_t i = 0; i < NUM_ALLOCS; ++i) {
-            MessageBuffer256 buf;
-            volatile auto* ptr = &buf;
-            (void)ptr;
-        }
-        end = high_resolution_clock::now();
-        double stackTimeUs = duration<double, std::micro>(end - start).count();
-
-        std::cout << "Allocation Type    | Time (µs) | Ops/sec" << std::endl;
-        std::cout << "-------------------|-----------|----------" << std::endl;
-        std::cout << "Dynamic (new/del)  | " << std::setw(9) << std::fixed << std::setprecision(2)
-                  << dynamicTimeUs / NUM_ALLOCS << " | "
-                  << std::setw(8) << static_cast<size_t>(NUM_ALLOCS / (dynamicTimeUs / 1000000.0)) << std::endl;
-        std::cout << "Memory Pool        | " << std::setw(9)
-                  << poolTimeUs / NUM_ALLOCS << " | "
-                  << std::setw(8) << static_cast<size_t>(NUM_ALLOCS / (poolTimeUs / 1000000.0)) << std::endl;
-        std::cout << "Stack              | " << std::setw(9)
-                  << stackTimeUs / NUM_ALLOCS << " | "
-                  << std::setw(8) << static_cast<size_t>(NUM_ALLOCS / (stackTimeUs / 1000000.0)) << std::endl;
+    std::cout << "Allocation Type    | Time (µs) | Ops/sec" << std::endl;
+    std::cout << "-------------------|-----------|----------" << std::endl;
+    std::cout << "Dynamic (new/del)  | " << std::setw(9) << std::fixed << std::setprecision(2)
+          << dynamicTimeUs / NUM_ALLOCS << " | "
+          << std::setw(8) << static_cast<size_t>(NUM_ALLOCS / (dynamicTimeUs / 1000000.0)) << std::endl;
     }
 
     BenchmarkResult benchmarkEndToEnd() {
@@ -323,7 +287,6 @@ private:
         BenchmarkResult result;
         result.totalMessages = latencies.size();
 
-        // Calculate mean
         double sum = 0;
         for (double lat : latencies) {
             sum += lat;

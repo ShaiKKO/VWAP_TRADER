@@ -1,5 +1,7 @@
 #include "simulator.h"
 #include "endian_converter.h"
+#include "message_serializer.h"
+#include "wire_format.h"
 #include <iostream>
 #include <cstring>
 #include <cstdlib>
@@ -9,6 +11,8 @@
 #include <fstream>
 #include <sstream>
 #include <algorithm>
+#include <thread>
+#include <mutex>
 #include <unistd.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -21,17 +25,18 @@ MarketDataSimulator::MarketDataSimulator(const SimulatorConfig& cfg)
     , running(false)
     , shouldStop(false)
     , serverSocket(-1)
+    , rngSeed(std::chrono::steady_clock::now().time_since_epoch().count())
     , currentBid(config.basePrice - 0.01)
     , currentAsk(config.basePrice + 0.01)
     , sequenceNumber(0) {
-    
+
     if (config.scenario == MarketScenario::CSV_REPLAY && !config.csvPath.empty()) {
         auto csvReader = std::make_unique<CSVReader>(config.csvPath);
         if (csvReader->loadFile()) {
             csvReplayEngine = std::make_unique<CSVReplayEngine>(
                 std::move(csvReader), config.replaySpeed);
             csvReplayEngine->start();
-            std::cout << "CSV replay engine initialized with " 
+            std::cout << "CSV replay engine initialized with "
                       << csvReplayEngine->getTotalRecords() << " records" << std::endl;
         } else {
             std::cerr << "Failed to load CSV file: " << config.csvPath << std::endl;
@@ -47,26 +52,26 @@ bool MarketDataSimulator::start() {
     if (running.load()) {
         return false;
     }
-    
+
     shouldStop.store(false);
-    
+
     if (!setupSocket()) {
         return false;
     }
-    
+
     running.store(true);
     serverThread = std::thread(&MarketDataSimulator::runServer, this);
-    
+
     return true;
 }
 
 void MarketDataSimulator::stop() {
     shouldStop.store(true);
-    
+
     if (serverThread.joinable()) {
         serverThread.join();
     }
-    
+
     cleanup();
     running.store(false);
 }
@@ -77,47 +82,46 @@ bool MarketDataSimulator::setupSocket() {
         std::cerr << "Failed to create socket" << std::endl;
         return false;
     }
-    
+
     int opt = 1;
     if (setsockopt(serverSocket, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
         std::cerr << "Failed to set socket options" << std::endl;
         close(serverSocket);
         return false;
     }
-    
+
     struct sockaddr_in serverAddr;
     memset(&serverAddr, 0, sizeof(serverAddr));
     serverAddr.sin_family = AF_INET;
     serverAddr.sin_addr.s_addr = INADDR_ANY;
     serverAddr.sin_port = htons(config.port);
-    
+
     if (bind(serverSocket, (struct sockaddr*)&serverAddr, sizeof(serverAddr)) < 0) {
         std::cerr << "Failed to bind to port " << config.port << std::endl;
         close(serverSocket);
         return false;
     }
-    
+
     if (listen(serverSocket, 5) < 0) {
         std::cerr << "Failed to listen on socket" << std::endl;
         close(serverSocket);
         return false;
     }
-    
-    // Set non-blocking mode
+
     int flags = fcntl(serverSocket, F_GETFL, 0);
     fcntl(serverSocket, F_SETFL, flags | O_NONBLOCK);
-    
+
     if (config.verbose) {
         std::cout << "Simulator listening on port " << config.port << std::endl;
     }
-    
+
     return true;
 }
 
 void MarketDataSimulator::runServer() {
     std::thread acceptThread(&MarketDataSimulator::acceptClients, this);
     std::thread dataThread(&MarketDataSimulator::generateMarketData, this);
-    
+
     acceptThread.join();
     dataThread.join();
 }
@@ -126,40 +130,44 @@ void MarketDataSimulator::acceptClients() {
     while (!shouldStop.load()) {
         struct sockaddr_in clientAddr;
         socklen_t clientLen = sizeof(clientAddr);
-        
+
         int clientSocket = accept(serverSocket, (struct sockaddr*)&clientAddr, &clientLen);
         if (clientSocket >= 0) {
+            std::lock_guard<std::mutex> lock(clientSocketsMutex);
             clientSockets.push_back(clientSocket);
             if (config.verbose) {
-                std::cout << "Client connected from " << inet_ntoa(clientAddr.sin_addr) 
+                std::cout << "Client connected from " << inet_ntoa(clientAddr.sin_addr)
                          << ":" << ntohs(clientAddr.sin_port) << std::endl;
             }
         }
-        
-        // Clean up disconnected clients
-        clientSockets.erase(
-            std::remove_if(clientSockets.begin(), clientSockets.end(),
-                [](int sock) {
-                    char buf;
-                    int result = recv(sock, &buf, 1, MSG_PEEK | MSG_DONTWAIT);
-                    return result == 0;
-                }),
-            clientSockets.end()
-        );
-        
-        usleep(100000); // 100ms
+
+        {
+            std::lock_guard<std::mutex> lock(clientSocketsMutex);
+            clientSockets.erase(
+                std::remove_if(clientSockets.begin(), clientSockets.end(),
+                    [](int sock) {
+                        char buf;
+                        int result = recv(sock, &buf, 1, MSG_PEEK | MSG_DONTWAIT);
+                        return result == 0;
+                    }),
+                clientSockets.end()
+            );
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 }
 
 void MarketDataSimulator::generateMarketData() {
     auto startTime = std::chrono::steady_clock::now();
     auto lastMessageTime = startTime;
-    int messageInterval = 1000000 / config.messagesPerSecond; // microseconds
-    
+
+    int messagesPerSec = std::max(1, std::min(10000, config.messagesPerSecond));
+    int messageInterval = 1000000 / messagesPerSec;
+
     while (!shouldStop.load()) {
         auto now = std::chrono::steady_clock::now();
-        
-        // Check duration limit
+
         if (config.duration > 0) {
             auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - startTime).count();
             if (elapsed >= config.duration) {
@@ -167,13 +175,12 @@ void MarketDataSimulator::generateMarketData() {
                 break;
             }
         }
-        
-        // Rate control
+
         auto timeSinceLastMessage = std::chrono::duration_cast<std::chrono::microseconds>(
             now - lastMessageTime).count();
-        
+
         if (timeSinceLastMessage >= messageInterval) {
-            // Generate market data based on scenario
+
             switch (config.scenario) {
                 case MarketScenario::STEADY:
                     generateSteadyPrices();
@@ -191,66 +198,65 @@ void MarketDataSimulator::generateMarketData() {
                     replayFromCSV();
                     break;
             }
-            
-            // Alternate between quotes and trades
+
             if (sequenceNumber % 3 == 0) {
-                // Send trade
+
                 TradeMessage trade = createTrade();
                 std::vector<uint8_t> data = serializeTrade(trade);
                 broadcastMessage(data.data(), data.size());
             } else {
-                // Send quote
+
                 QuoteMessage quote = createQuote();
                 std::vector<uint8_t> data = serializeQuote(quote);
                 broadcastMessage(data.data(), data.size());
             }
-            
+
             sequenceNumber++;
             lastMessageTime = now;
         }
-        
-        usleep(1000); // 1ms sleep to prevent busy waiting
+
+        std::this_thread::sleep_for(std::chrono::microseconds(1000));
     }
 }
 
 void MarketDataSimulator::generateSteadyPrices() {
-    static std::random_device rd;
-    static std::mt19937 gen(rd());
-    static std::normal_distribution<> dis(0.0, config.volatility);
-    
+
+    thread_local std::mt19937 gen(rngSeed.fetch_add(1));
+    thread_local std::normal_distribution<> dis(0.0, config.volatility);
+
     double change = dis(gen) * 0.01;
     double midPrice = (currentBid + currentAsk) / 2.0;
     midPrice += change;
-    
+
     double spread = 0.01 + (std::abs(dis(gen)) * 0.005);
     currentBid = midPrice - spread / 2.0;
     currentAsk = midPrice + spread / 2.0;
 }
 
 void MarketDataSimulator::generateTrendingPrices(bool up) {
-    static std::random_device rd;
-    static std::mt19937 gen(rd());
-    static std::normal_distribution<> dis(0.0, config.volatility);
-    
+
+    thread_local std::mt19937 gen(rngSeed.fetch_add(1));
+    thread_local std::normal_distribution<> dis(0.0, config.volatility);
+
     double trend = up ? 0.001 : -0.001;
     double noise = dis(gen) * 0.01;
     double midPrice = (currentBid + currentAsk) / 2.0;
     midPrice *= (1.0 + trend + noise);
-    
+
     double spread = 0.01 + (std::abs(dis(gen)) * 0.005);
     currentBid = midPrice - spread / 2.0;
     currentAsk = midPrice + spread / 2.0;
 }
 
 void MarketDataSimulator::generateVolatilePrices() {
-    static std::random_device rd;
-    static std::mt19937 gen(rd());
-    static std::normal_distribution<> dis(0.0, config.volatility * 3.0);
-    
+
+    thread_local std::mt19937 gen(rngSeed.fetch_add(1));
+    thread_local std::normal_distribution<> dis(0.0, config.volatility * 3.0);
+
     double change = dis(gen) * 0.02;
     double midPrice = (currentBid + currentAsk) / 2.0;
     midPrice *= (1.0 + change);
-    
+
     double spread = 0.01 + (std::abs(dis(gen)) * 0.02);
     currentBid = midPrice - spread / 2.0;
     currentAsk = midPrice + spread / 2.0;
@@ -264,23 +270,23 @@ void MarketDataSimulator::replayFromCSV() {
         generateSteadyPrices();
         return;
     }
-    
+
     MarketDataRecord record;
     if (csvReplayEngine->getNextMessage(record)) {
         if (record.type == MarketDataRecord::QUOTE) {
             currentBid = record.quote.bidPrice;
             currentAsk = record.quote.askPrice;
-            
+
             QuoteMessage quote = createQuote();
             quote.bidQuantity = record.quote.bidQuantity;
             quote.askQuantity = record.quote.askQuantity;
-            
+
             auto data = serializeQuote(quote);
             broadcastMessage(data.data(), data.size());
-            
+
             if (config.verbose) {
-                std::cout << "[CSV] Quote: " << config.symbol 
-                          << " Bid: $" << currentBid 
+                std::cout << "[CSV] Quote: " << config.symbol
+                          << " Bid: $" << currentBid
                           << " Ask: $" << currentAsk
                           << " Progress: " << csvReplayEngine->getProgress() << "%"
                           << std::endl;
@@ -289,13 +295,13 @@ void MarketDataSimulator::replayFromCSV() {
             TradeMessage trade = createTrade();
             trade.price = static_cast<int32_t>(record.trade.price * 100);
             trade.quantity = record.trade.quantity;
-            
+
             auto data = serializeTrade(trade);
             broadcastMessage(data.data(), data.size());
-            
+
             if (config.verbose) {
-                std::cout << "[CSV] Trade: " << config.symbol 
-                          << " Price: $" << record.trade.price 
+                std::cout << "[CSV] Trade: " << config.symbol
+                          << " Price: $" << record.trade.price
                           << " Qty: " << record.trade.quantity
                           << std::endl;
             }
@@ -313,11 +319,17 @@ void MarketDataSimulator::replayFromCSV() {
 QuoteMessage MarketDataSimulator::createQuote() {
     QuoteMessage quote;
     memset(&quote, 0, sizeof(quote));
-    strncpy(quote.symbol, config.symbol.c_str(), 8);
+
+    memset(quote.symbol, 0, sizeof(quote.symbol));
+    memcpy(quote.symbol, config.symbol.c_str(),
+           std::min(sizeof(quote.symbol), config.symbol.length()));
     quote.timestamp = getCurrentTimestamp();
-    quote.bidQuantity = 100 + (rand() % 900);
+
+    thread_local std::mt19937 gen(rngSeed.fetch_add(1));
+    thread_local std::uniform_int_distribution<> qty_dis(100, 999);
+    quote.bidQuantity = qty_dis(gen);
     quote.bidPrice = static_cast<int32_t>(currentBid * 100);
-    quote.askQuantity = 100 + (rand() % 900);
+    quote.askQuantity = qty_dis(gen);
     quote.askPrice = static_cast<int32_t>(currentAsk * 100);
     return quote;
 }
@@ -325,62 +337,80 @@ QuoteMessage MarketDataSimulator::createQuote() {
 TradeMessage MarketDataSimulator::createTrade() {
     TradeMessage trade;
     memset(&trade, 0, sizeof(trade));
-    strncpy(trade.symbol, config.symbol.c_str(), 8);
+
+    memset(trade.symbol, 0, sizeof(trade.symbol));
+    memcpy(trade.symbol, config.symbol.c_str(),
+           std::min(sizeof(trade.symbol), config.symbol.length()));
     trade.timestamp = getCurrentTimestamp();
-    trade.quantity = 100 + (rand() % 500);
-    // Trade at mid price
+
+    thread_local std::mt19937 gen(rngSeed.fetch_add(1));
+    thread_local std::uniform_int_distribution<> qty_dis(100, 599);
+    trade.quantity = qty_dis(gen);
+
     trade.price = static_cast<int32_t>((currentBid + currentAsk) * 50);
     return trade;
 }
 
 std::vector<uint8_t> MarketDataSimulator::serializeQuote(const QuoteMessage& quote) {
-    std::vector<uint8_t> buffer(sizeof(MessageHeader) + sizeof(QuoteMessage));
-    
-    MessageHeader* header = reinterpret_cast<MessageHeader*>(buffer.data());
-    header->length = EndianConverter::htol32(sizeof(QuoteMessage));
-    header->type = MessageHeader::QUOTE_TYPE;
-    
-    QuoteMessage* networkQuote = reinterpret_cast<QuoteMessage*>(buffer.data() + sizeof(MessageHeader));
-    memcpy(networkQuote->symbol, quote.symbol, 8);
-    networkQuote->timestamp = EndianConverter::htol64(quote.timestamp);
-    networkQuote->bidQuantity = EndianConverter::htol32(quote.bidQuantity);
-    networkQuote->bidPrice = EndianConverter::htol32_signed(quote.bidPrice);
-    networkQuote->askQuantity = EndianConverter::htol32(quote.askQuantity);
-    networkQuote->askPrice = EndianConverter::htol32_signed(quote.askPrice);
-    
+    std::vector<uint8_t> buffer(WireFormat::HEADER_SIZE + WireFormat::QUOTE_SIZE);
+
+    size_t size = MessageSerializer::serializeQuoteMessage(
+        buffer.data(), buffer.size(), quote);
+
+    if (size == 0) {
+        buffer.clear();
+    } else {
+        buffer.resize(size);
+    }
+
     return buffer;
 }
 
 std::vector<uint8_t> MarketDataSimulator::serializeTrade(const TradeMessage& trade) {
-    std::vector<uint8_t> buffer(sizeof(MessageHeader) + sizeof(TradeMessage));
-    
-    MessageHeader* header = reinterpret_cast<MessageHeader*>(buffer.data());
-    header->length = EndianConverter::htol32(sizeof(TradeMessage));
-    header->type = MessageHeader::TRADE_TYPE;
-    
-    TradeMessage* networkTrade = reinterpret_cast<TradeMessage*>(buffer.data() + sizeof(MessageHeader));
-    memcpy(networkTrade->symbol, trade.symbol, 8);
-    networkTrade->timestamp = EndianConverter::htol64(trade.timestamp);
-    networkTrade->quantity = EndianConverter::htol32(trade.quantity);
-    networkTrade->price = EndianConverter::htol32_signed(trade.price);
-    
+    std::vector<uint8_t> buffer(WireFormat::HEADER_SIZE + WireFormat::TRADE_SIZE);
+
+    size_t size = MessageSerializer::serializeTradeMessage(
+        buffer.data(), buffer.size(), trade);
+
+    if (size == 0) {
+        buffer.clear();
+    } else {
+        buffer.resize(size);
+    }
+
     return buffer;
 }
 
 void MarketDataSimulator::broadcastMessage(const uint8_t* data, size_t size) {
-    for (auto it = clientSockets.begin(); it != clientSockets.end(); ) {
-        ssize_t sent = send(*it, data, size, MSG_NOSIGNAL);
+
+    std::vector<int> socketsCopy;
+    {
+        std::lock_guard<std::mutex> lock(clientSocketsMutex);
+        socketsCopy = clientSockets;
+    }
+
+    std::vector<int> failedSockets;
+    for (int sock : socketsCopy) {
+        ssize_t sent = send(sock, data, size, MSG_NOSIGNAL);
         if (sent < 0) {
-            close(*it);
-            it = clientSockets.erase(it);
-        } else {
-            ++it;
+            failedSockets.push_back(sock);
         }
     }
-    
+
+    if (!failedSockets.empty()) {
+        std::lock_guard<std::mutex> lock(clientSocketsMutex);
+        for (int failedSock : failedSockets) {
+            close(failedSock);
+            clientSockets.erase(
+                std::remove(clientSockets.begin(), clientSockets.end(), failedSock),
+                clientSockets.end()
+            );
+        }
+    }
+
     if (config.verbose && sequenceNumber % 10 == 0) {
-        std::cout << "Sent message #" << sequenceNumber 
-                 << " (Bid: " << currentBid 
+        std::cout << "Sent message #" << sequenceNumber
+                 << " (Bid: " << currentBid
                  << ", Ask: " << currentAsk << ")" << std::endl;
     }
 }
@@ -392,11 +422,12 @@ uint64_t MarketDataSimulator::getCurrentTimestamp() {
 }
 
 void MarketDataSimulator::cleanup() {
+    std::lock_guard<std::mutex> lock(clientSocketsMutex);
     for (int sock : clientSockets) {
         close(sock);
     }
     clientSockets.clear();
-    
+
     if (serverSocket >= 0) {
         close(serverSocket);
         serverSocket = -1;
@@ -405,10 +436,10 @@ void MarketDataSimulator::cleanup() {
 
 SimulatorConfig parseCommandLine(int argc, char* argv[]) {
     SimulatorConfig config;
-    
+
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
-        
+
         if (arg == "-p" || arg == "--port") {
             if (++i < argc) {
                 config.port = std::stoi(argv[i]);
@@ -458,7 +489,7 @@ SimulatorConfig parseCommandLine(int argc, char* argv[]) {
             exit(0);
         }
     }
-    
+
     return config;
 }
 

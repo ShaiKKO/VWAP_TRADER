@@ -3,64 +3,65 @@
 
 #include <cstdint>
 #include <cstring>
+#include <cstddef>
+#include <type_traits>
 
-#pragma pack(push, 1)
-
-struct alignas(1) MessageHeader {
+struct MessageHeader {
     uint8_t length;
     uint8_t type;
-    uint8_t reserved;
     
     static constexpr uint8_t QUOTE_TYPE = 1;
     static constexpr uint8_t TRADE_TYPE = 2;
-    static constexpr uint8_t ORDER_TYPE = 3;
-    static constexpr size_t SIZE = 3;
+    // NO ORDER_TYPE - Orders are sent as 25 bytes without any header per spec
 };
 
-struct alignas(1) QuoteMessage {
+struct QuoteMessage {
     char symbol[8];
     uint64_t timestamp;
     uint32_t bidQuantity;
     uint32_t bidPrice;
     uint32_t askQuantity;
     int32_t askPrice;
-    
-    static constexpr size_t SIZE = 32;
-    
-    constexpr QuoteMessage() noexcept
-        : symbol{}, timestamp(0), bidQuantity(0), bidPrice(0), askQuantity(0), askPrice(0) {}
 };
 
-struct alignas(1) TradeMessage {
+struct TradeMessage {
+    char symbol[8];
     uint64_t timestamp;
-    char symbol[4];
     uint32_t quantity;
     int32_t price;
-    
-    static constexpr size_t SIZE = 20;
-    
-    constexpr TradeMessage() noexcept
-        : timestamp(0), symbol{}, quantity(0), price(0) {}
 };
 
-struct alignas(1) OrderMessage {
+struct OrderMessage {
+    char symbol[8];
     uint64_t timestamp;
-    char symbol[4];
+    uint32_t quantity;
+    int32_t price;
     char side;
-    uint32_t quantity;
-    int32_t price;
+    char _padding[3];
     
-    static constexpr size_t SIZE = 21;
-    
-    constexpr OrderMessage() noexcept
-        : timestamp(0), symbol{}, side(0), quantity(0), price(0) {}
+    OrderMessage() noexcept {
+        std::memset(this, 0, sizeof(*this));
+    }
 };
 
-#pragma pack(pop)
+static_assert(sizeof(MessageHeader) == 2, "MessageHeader must be 2 bytes");
+static_assert(sizeof(QuoteMessage) == 32, "QuoteMessage must be 32 bytes");
+static_assert(sizeof(TradeMessage) == 24, "TradeMessage must be 24 bytes");
+static_assert(sizeof(OrderMessage) == 32, "OrderMessage must be 32 bytes (28 bytes + 4 alignment)");
 
-static_assert(sizeof(MessageHeader) == MessageHeader::SIZE, "MessageHeader size mismatch");
-static_assert(sizeof(QuoteMessage) == QuoteMessage::SIZE, "QuoteMessage size mismatch");
-static_assert(sizeof(TradeMessage) == TradeMessage::SIZE, "TradeMessage size mismatch");
-static_assert(sizeof(OrderMessage) == OrderMessage::SIZE, "OrderMessage size mismatch");
+static_assert(offsetof(MessageHeader, type) == 1, "Header type at offset 1");
+static_assert(offsetof(QuoteMessage, timestamp) == 8, "Quote timestamp at offset 8");
+static_assert(offsetof(TradeMessage, timestamp) == 8, "Trade timestamp at offset 8");
+static_assert(offsetof(TradeMessage, quantity) == 16, "Trade quantity at offset 16");
+static_assert(offsetof(TradeMessage, price) == 20, "Trade price at offset 20");
+static_assert(offsetof(OrderMessage, timestamp) == 8, "Order timestamp at offset 8");
+static_assert(offsetof(OrderMessage, quantity) == 16, "Order quantity at offset 16");
+static_assert(offsetof(OrderMessage, price) == 20, "Order price at offset 20");
+static_assert(offsetof(OrderMessage, side) == 24, "Order side at offset 24");
+
+static_assert(std::is_trivially_copyable<MessageHeader>::value, "MessageHeader must be trivially copyable");
+static_assert(std::is_trivially_copyable<QuoteMessage>::value, "QuoteMessage must be trivially copyable");
+static_assert(std::is_trivially_copyable<TradeMessage>::value, "TradeMessage must be trivially copyable");
+static_assert(std::is_trivially_copyable<OrderMessage>::value, "OrderMessage must be trivially copyable");
 
 #endif // MESSAGE_H

@@ -5,6 +5,7 @@
 #include <memory>
 #include <vector>
 #include <cstdint>
+#include <functional>
 #include "message.h"
 #include "optional.h"
 #include "vwap_calculator.h"
@@ -18,7 +19,7 @@ public:
         READY_TO_TRADE,
         ORDER_SENT
     };
-    
+
     struct OrderRecord {
         uint64_t timestamp;
         std::string symbol;
@@ -27,40 +28,42 @@ public:
         int32_t price;
         std::string reason;
     };
-    
+
 private:
     std::string symbol;
     char side;
     uint32_t maxOrderSize;
     uint32_t vwapWindowSeconds;
-    
+
     State currentState;
-    
+
     std::unique_ptr<VwapCalculator> vwapCalculator;
     std::unique_ptr<DecisionEngine> decisionEngine;
-    
+    std::function<void(const OrderMessage&)> orderCallback;
+
     uint64_t totalQuotesProcessed;
     uint64_t totalTradesProcessed;
     uint64_t totalOrdersSent;
     bool vwapWindowCompleteNotified;
-    
+
     static constexpr size_t MAX_ORDER_HISTORY = 1000;
     CircularBuffer<OrderRecord, MAX_ORDER_HISTORY> orderHistory;
-    
+
 public:
-    OrderManager(const std::string& symbol, char side, 
+    OrderManager(const std::string& symbol, char side,
                 uint32_t maxOrderSize, uint32_t vwapWindowSeconds);
     ~OrderManager();
-    
+
     OrderManager(const OrderManager&) = delete;
     OrderManager& operator=(const OrderManager&) = delete;
-    
+
     OrderManager(OrderManager&&) = default;
     OrderManager& operator=(OrderManager&&) = default;
-    
+
     Optional<OrderMessage> processQuote(const QuoteMessage& quote);
     void processTrade(const TradeMessage& trade);
-    
+    void setOrderCallback(std::function<void(const OrderMessage&)> cb) { orderCallback = std::move(cb); }
+
     void printStatistics() const;
     void printOrderHistory() const;
     void printOrderHistory(size_t count) const;
@@ -70,8 +73,7 @@ public:
     uint64_t getQuoteCount() const noexcept { return totalQuotesProcessed; }
     uint64_t getTradeCount() const noexcept { return totalTradesProcessed; }
     uint64_t getOrderCount() const noexcept { return totalOrdersSent; }
-    uint64_t getTotalOrdersSent() const noexcept { return totalOrdersSent; }
-    
+
     std::vector<OrderRecord> getOrderHistory() const {
         std::vector<OrderRecord> history;
         for (const auto& record : orderHistory) {
@@ -79,10 +81,11 @@ public:
         }
         return history;
     }
-    
+
 private:
     void checkVwapWindowComplete();
     void recordOrder(const OrderMessage& order, const std::string& reason);
+    std::string buildReason(const QuoteMessage& q, int32_t vwapCents) const;
 };
 
-#endif // ORDER_MANAGER_H
+#endif

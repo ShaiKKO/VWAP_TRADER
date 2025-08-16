@@ -9,7 +9,7 @@
 #include "order_manager.h"
 #include "network_manager.h"
 #include "message.h"
-#include "message_builder.h"
+#include "metrics.h"
 
 volatile sig_atomic_t g_shutdown_requested = 0;
 
@@ -212,7 +212,6 @@ int main(int argc, char* argv[]) {
 
             orderManager.processTrade(trade);
 
-            // Log VWAP updates periodically
             if (totalTrades % 10 == 0) {
                 double currentVwap = orderManager.getCurrentVwap();
                 if (currentVwap > 0) {

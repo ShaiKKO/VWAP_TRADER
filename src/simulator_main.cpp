@@ -14,7 +14,7 @@ void signalHandler(int signal) {
 }
 
 int main(int argc, char* argv[]) {
-    // Set up signal handlers
+
     signal(SIGINT, signalHandler);
     signal(SIGTERM, signalHandler);
 
@@ -65,7 +65,7 @@ int main(int argc, char* argv[]) {
     std::cout << "Simulator is running. Waiting for connections..." << std::endl;
 
     while (!shouldExit.load() && simulator.isRunning()) {
-        usleep(100000); // 100ms
+        usleep(100000);
     }
 
     simulator.stop();

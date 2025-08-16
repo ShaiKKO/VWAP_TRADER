@@ -10,12 +10,12 @@ class MarketDataClient : public TcpClient {
 private:
     MessageBuffer receiveBuffer;
     std::function<void(const MessageHeader&, const void*)> messageCallback;
-    
+
 public:
     MarketDataClient(const std::string& host, uint16_t port);
-    
+
     void setMessageCallback(std::function<void(const MessageHeader&, const void*)> cb);
     bool processIncomingData();
 };
 
-#endif // MARKET_DATA_CLIENT_H
+#endif

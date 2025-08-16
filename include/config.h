@@ -13,11 +13,10 @@ struct Config {
     uint16_t marketDataPort;
     std::string orderHost;
     uint16_t orderPort;
-    
-    // Default constructor
+
     Config() noexcept
         : side('B'), maxOrderSize(0), vwapWindowSeconds(0),
           marketDataPort(0), orderPort(0) {}
 };
 
-#endif // CONFIG_H
+#endif

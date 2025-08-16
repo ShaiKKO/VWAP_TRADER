@@ -1,105 +1,85 @@
 #include "message_buffer.h"
 #include "message_parser.h"
+#include "wire_format.h"
 #include <cstring>
 #include <algorithm>
+#include "metrics.h"
 
-MessageBuffer::MessageBuffer() noexcept : writePos(0), readPos(0) {
-}
+MessageBuffer::MessageBuffer() noexcept : head(0), tail(0), used(0) {}
 
 bool MessageBuffer::append(const uint8_t* data, size_t len) noexcept {
-    if (len == 0) {
-        return true;
-    }
-    
-    if (writePos + len > BUFFER_SIZE) {
-        compact();
-        
-        if (writePos + len > BUFFER_SIZE) {
-            return false;
-        }
-    }
-    
-    std::memcpy(buffer + writePos, data, len);
-    writePos += len;
-    
+    if (!len) return true;
+    if (len > BUFFER_SIZE - used) return false;
+    size_t first = std::min(len, BUFFER_SIZE - tail);
+    std::memcpy(buffer + tail, data, first);
+    size_t second = len - first;
+    if (second) std::memcpy(buffer, data + first, second);
+    tail = (tail + len) & (BUFFER_SIZE - 1);
+    used += len;
     return true;
 }
 
-MessageBuffer::ExtractResult MessageBuffer::extractMessage(MessageHeader& header, uint8_t* messageBuffer) noexcept {
-    size_t available = writePos - readPos;
-    
-    if (available < MessageHeader::SIZE) {
-        return ExtractResult::NEED_MORE_DATA;
-    }
-    
-    if (!MessageParser::parseHeader(buffer + readPos, available, header)) {
-        return ExtractResult::INVALID_MESSAGE;
-    }
-    
-    if (!MessageParser::validateHeader(header)) {
-        readPos += resync();
-        return ExtractResult::INVALID_MESSAGE;
-    }
-    
-    size_t totalSize = MessageHeader::SIZE + header.length;
-    if (available < totalSize) {
-        return ExtractResult::NEED_MORE_DATA;
-    }
-    
-    std::memcpy(messageBuffer, buffer + readPos + MessageHeader::SIZE, header.length);
-    
-    readPos += totalSize;
-    
-    if (readPos == writePos) {
-        readPos = 0;
-        writePos = 0;
-    }
-    
+MessageBuffer::ExtractResult MessageBuffer::peekMessage(MessageHeader& header, const uint8_t*& bodyPtr, size_t& contiguousBody) const noexcept {
+    if (used < WireFormat::HEADER_SIZE) return ExtractResult::NEED_MORE_DATA;
+    uint8_t len = buffer[head];
+    uint8_t type = buffer[(head + 1) & (BUFFER_SIZE - 1)];
+    header.length = len;
+    header.type = type;
+    if (!MessageParser::validateHeader(header)) return ExtractResult::INVALID_HEADER;
+    size_t total = WireFormat::HEADER_SIZE + header.length;
+    if (used < total) return ExtractResult::NEED_MORE_DATA;
+    size_t bodyStart = (head + WireFormat::HEADER_SIZE) & (BUFFER_SIZE - 1);
+    bodyPtr = buffer + bodyStart;
+    contiguousBody = std::min(static_cast<size_t>(header.length), BUFFER_SIZE - bodyStart);
     return ExtractResult::SUCCESS;
 }
 
-size_t MessageBuffer::availableBytes() const noexcept {
-    return writePos - readPos;
+void MessageBuffer::consume(const MessageHeader& header) noexcept {
+    size_t total = WireFormat::HEADER_SIZE + header.length;
+    head = (head + total) & (BUFFER_SIZE - 1);
+    used -= total;
 }
 
-size_t MessageBuffer::availableSpace() const noexcept {
-    return BUFFER_SIZE - writePos;
-}
-
-void MessageBuffer::clear() noexcept {
-    readPos = 0;
-    writePos = 0;
-}
-
-void MessageBuffer::compact() noexcept {
-    if (readPos == 0) {
-        return;
+MessageBuffer::ExtractResult MessageBuffer::extractMessage(MessageHeader& header, uint8_t* messageBuffer) noexcept {
+    const uint8_t* body; size_t contiguous; auto r = peekMessage(header, body, contiguous);
+    if (r != ExtractResult::SUCCESS) return r;
+    if (contiguous == header.length) {
+        std::memcpy(messageBuffer, body, header.length);
+    } else {
+        size_t first = contiguous;
+        std::memcpy(messageBuffer, body, first);
+        std::memcpy(messageBuffer + first, buffer, header.length - first);
     }
-    
-    size_t remaining = writePos - readPos;
-    if (remaining > 0) {
-        std::memmove(buffer, buffer + readPos, remaining);
-    }
-    
-    writePos = remaining;
-    readPos = 0;
+    consume(header);
+    return ExtractResult::SUCCESS;
 }
+
+size_t MessageBuffer::availableBytes() const noexcept { return used; }
+
+size_t MessageBuffer::availableSpace() const noexcept { return BUFFER_SIZE - used; }
+
+void MessageBuffer::clear() noexcept { head = tail = used = 0; }
 
 size_t MessageBuffer::resync() noexcept {
-    size_t available = writePos - readPos;
-    
-    for (size_t i = 1; i < available - 1; i++) {
-        uint8_t type = buffer[readPos + i + 1];
-        
-        if (type == MessageHeader::QUOTE_TYPE || type == MessageHeader::TRADE_TYPE) {
-            uint8_t length = buffer[readPos + i];
-            
-            if ((type == MessageHeader::QUOTE_TYPE && length == QuoteMessage::SIZE) ||
-                (type == MessageHeader::TRADE_TYPE && length == TradeMessage::SIZE)) {
-                return i;
-            }
-        }
+    size_t available = used;
+    if (available < WireFormat::HEADER_SIZE + 1) return available;
+
+    const size_t MAX_SCAN = 256;
+    size_t limit = (available < MAX_SCAN) ? available : MAX_SCAN;
+    for (size_t i = 1; i + 1 < limit; ++i) {
+        uint8_t length = buffer[(head + i) & (BUFFER_SIZE - 1)];
+        uint8_t type   = buffer[(head + i + 1) & (BUFFER_SIZE - 1)];
+        bool plausible = false;
+        if (type == MessageHeader::QUOTE_TYPE && length == WireFormat::QUOTE_SIZE) plausible = true;
+        else if (type == MessageHeader::TRADE_TYPE && length == WireFormat::TRADE_SIZE) plausible = true;
+        if (plausible) return i;
     }
-    
-    return available;
+
+    extern SystemMetrics g_systemMetrics;
+    if (limit >= 8) {
+        g_systemMetrics.perf.resyncEvents.fetch_add(1, std::memory_order_relaxed);
+    }
+    head = (head + limit) & (BUFFER_SIZE - 1);
+    used -= std::min(used, limit);
+    return limit;
 }
