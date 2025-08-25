@@ -2,7 +2,7 @@
 #include "../include/vwap_calculator.h"
 #include "../include/order_manager.h"
 #include "../include/message_parser.h"
-#include "../include/message_builder.h"
+#include "../include/message_serializer.h"
 #include <chrono>
 #include <random>
 #include <vector>

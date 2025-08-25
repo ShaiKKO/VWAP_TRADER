@@ -51,7 +51,7 @@ public:
         
         bool passed = (manager.getState() == OrderManager::State::WAITING_FOR_FIRST_WINDOW);
         passed = passed && (manager.getCurrentVwap() == 0.0);
-        passed = passed && (manager.getTotalOrdersSent() == 0);
+        passed = passed && (manager.getOrderCount() == 0);
         
         if (!passed) {
             std::cerr << "  Initial state not correct" << std::endl;
@@ -69,7 +69,7 @@ public:
         
         bool passed = !order.has_value();
         passed = passed && (manager.getState() == OrderManager::State::WAITING_FOR_FIRST_WINDOW);
-        passed = passed && (manager.getTotalOrdersSent() == 0);
+        passed = passed && (manager.getOrderCount() == 0);
         
         if (!passed) {
             std::cerr << "  Should not send order before VWAP window complete" << std::endl;
@@ -223,7 +223,7 @@ public:
             return false;
         }
         
-        return manager.getTotalOrdersSent() == 0;
+        return manager.getOrderCount() == 0;
     }
     
     static bool testOrderHistory() {

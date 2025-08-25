@@ -1,7 +1,7 @@
 #include "test_comprehensive.h"
 #include "../include/message.h"
 #include "../include/message_parser.h"
-#include "../include/message_builder.h"
+#include "../include/message_serializer.h"
 #include "../include/endian_converter.h"
 #include <cstring>
 #include <arpa/inet.h>
@@ -184,7 +184,7 @@ public:
         });
         
         runTest("Message Builder Output", [this](std::string& details) {
-            MessageBuilder builder;
+            MessageSerializer serializer;
             
             OrderMessage order;
             std::strcpy(order.symbol, "IBM");

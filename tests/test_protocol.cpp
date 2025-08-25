@@ -3,7 +3,8 @@
 #include <iomanip>
 #include "message.h"
 #include "message_parser.h"
-#include "message_builder.h"
+#include "message_serializer.h"
+#include "wire_format.h"
 #include "message_buffer.h"
 #include "endian_converter.h"
 
@@ -130,10 +131,10 @@ public:
         order.quantity = 75;
         order.price = 13896;
         
-        uint8_t buffer[OrderMessage::SIZE];
-        size_t size = MessageBuilder::buildOrder(buffer, sizeof(buffer), order);
+        uint8_t buffer[WireFormat::ORDER_SIZE];
+        size_t size = MessageSerializer::serializeOrder(buffer, sizeof(buffer), order);
         
-        if (size != OrderMessage::SIZE) {
+        if (size != WireFormat::ORDER_SIZE) {
             std::cerr << "  Build returned wrong size: " << size << std::endl;
             return false;
         }
@@ -146,7 +147,7 @@ public:
             0x48, 0x36, 0x00, 0x00   // Price: 13896
         };
         
-        return compareBytes(buffer, expectedBytes, OrderMessage::SIZE);
+        return compareBytes(buffer, expectedBytes, WireFormat::ORDER_SIZE);
     }
     
     static bool testHeaderParsing() {
@@ -279,7 +280,7 @@ public:
         order.quantity = 100;
         order.price = 100;
         
-        if (MessageBuilder::validateOrder(order)) {
+        if (MessageParser::validateOrder(order)) {
             std::cerr << "  Should have rejected order with invalid side" << std::endl;
             return false;
         }
