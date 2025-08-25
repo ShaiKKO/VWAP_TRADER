@@ -135,13 +135,13 @@ private:
 class CSVReplayEngine final {
 private:
     std::unique_ptr<CSVReader> reader;
-    uint64_t startTimeNs;
+    std::chrono::steady_clock::time_point startTime;
     uint64_t baseTimestamp;
     double replaySpeed;
     bool isPaused;
     size_t currentPosition;
 
-    mutable uint64_t lastEmitTimeNs;
+    mutable std::chrono::steady_clock::time_point lastEmitTime;
     static constexpr auto MIN_INTERVAL = std::chrono::microseconds(100);
 
 public:

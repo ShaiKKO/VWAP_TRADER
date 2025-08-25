@@ -10,12 +10,6 @@
 #include "network_manager.h"
 #include "message.h"
 #include "metrics.h"
-#include "runtime_config.h"
-#include <thread>
-#include <cstdlib>
-#ifdef __APPLE__
-#include <pthread.h>
-#endif
 
 volatile sig_atomic_t g_shutdown_requested = 0;
 
@@ -144,16 +138,6 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    const char* pinEnv = std::getenv("VWAP_PIN_CPU");
-    if (pinEnv) {
-        // macOS does not have sched_setaffinity; we can try to set QoS to user-interactive to reduce jitter
-        #ifdef __APPLE__
-        pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
-        std::cout << "(QoS elevated for reduced jitter)" << std::endl;
-        #endif
-    }
-
-    runtimeConfig().loadFromEnv();
     print_startup_banner();
     print_config(config);
 

@@ -7,7 +7,6 @@
 #include "metrics.h"
 #include <array>
 #include <mutex>
-#include <sys/uio.h>
 
 class OrderClient : public TcpClient {
 private:
@@ -31,7 +30,9 @@ private:
         queue[qTail] = ps;
         qTail = (qTail + 1) % QUEUE_CAPACITY;
         ++qSize;
-    // queue high water tracking removed (metric retired to keep cache footprint tight)
+        if (qSize > g_systemMetrics.cold.queueHighWater.load(std::memory_order_relaxed)) {
+            g_systemMetrics.cold.queueHighWater.store(qSize, std::memory_order_relaxed);
+        }
         return true;
     }
     PendingSend& front() noexcept { return queue[qHead]; }
@@ -43,7 +44,6 @@ public:
 
     bool sendOrder(const OrderMessage& order) noexcept;
     void processSendQueue() noexcept;
-    void flushBatch() noexcept; // writev batching
 };
 
 #endif

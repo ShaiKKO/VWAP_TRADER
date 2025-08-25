@@ -25,20 +25,15 @@ private:
 
 public:
     MessageBuffer() noexcept;
-    enum class SoftWatermarkState : uint8_t { NORMAL=0, NEAR_CAPACITY=1 };
     bool append(const uint8_t* data, size_t len) noexcept;
 
     ExtractResult peekMessage(MessageHeader& header, const uint8_t*& bodyPtr, size_t& contiguousBody) const noexcept;
     void consume(const MessageHeader& header) noexcept;
     ExtractResult extractMessage(MessageHeader& header, uint8_t* messageBuffer) noexcept;
     size_t availableBytes() const noexcept;
-        mutable int cachedNextSize; // -1 invalid else next message total (header+len)
-        SoftWatermarkState watermarkState;
-        static constexpr size_t SOFT_WATERMARK = BUFFER_SIZE * 3 / 4; // 75%
     size_t availableSpace() const noexcept;
     void clear() noexcept;
     size_t resync() noexcept;
-    SoftWatermarkState getWatermarkState() const noexcept { return watermarkState; }
     const uint8_t* dataPtr() const noexcept { return buffer; }
     size_t headIndex() const noexcept { return head; }
 };

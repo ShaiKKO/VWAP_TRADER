@@ -96,12 +96,9 @@ bool MessageParser::validateHeader(const MessageHeader& header) noexcept {
 }
 
 bool MessageParser::validateQuote(const QuoteMessage& quote) noexcept {
-    // Reject any non-positive quantities (must both be >0). Tests expect zero qty rejection.
-    if (quote.bidQuantity == 0 || quote.askQuantity == 0) return false;
-    // Prices must be non-negative (negative already invalid) and typically >0; allow zero only if both zero which is meaningless -> reject
-    if (quote.askPrice <= 0 || static_cast<int32_t>(quote.bidPrice) <= 0) return false;
-    // Crossed market check: bid cannot exceed ask
-    if (static_cast<int32_t>(quote.bidPrice) > quote.askPrice) return false;
+
+    if (quote.askPrice < 0 || static_cast<int32_t>(quote.bidPrice) < 0) return false;
+    if (quote.bidQuantity && quote.askQuantity && quote.askPrice && static_cast<int32_t>(quote.bidPrice) > quote.askPrice) return false;
     return true;
 }
 
@@ -145,10 +142,6 @@ bool MessageParser::validateOrder(const OrderMessage& order) noexcept {
 }
 
 bool MessageParser::validateSymbol(const char* symbol, const char* expectedSymbol) noexcept {
-    if (Features::ENABLE_SYMBOL_INTERNING) {
-        uint64_t a; std::memcpy(&a, symbol, 8);
-        uint64_t b; std::memcpy(&b, expectedSymbol, 8);
-        return a == b; // 64-bit compare
-    }
+
     return std::memcmp(symbol, expectedSymbol, 8) == 0;
 }

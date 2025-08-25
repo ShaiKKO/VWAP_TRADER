@@ -6,7 +6,6 @@
 #include <errno.h>
 #include <cstring>
 #include <chrono>
-#include "time_source.h"
 #include <iostream>
 #include <netinet/tcp.h>
 #include <random>
@@ -174,7 +173,8 @@ bool TcpClient::reconnect() noexcept {
         return false;
     }
 
-    uint64_t nowMs = Time::instance().nowNanos() / 1000000ULL;
+    auto now = std::chrono::steady_clock::now();
+    uint64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
 
     if (lastConnectAttempt > 0 &&
         (nowMs - lastConnectAttempt) < currentBackoffMs) {
@@ -201,7 +201,7 @@ bool TcpClient::reconnect() noexcept {
 
 uint32_t TcpClient::calculateBackoff() noexcept {
 
-    thread_local std::mt19937 gen(static_cast<uint32_t>(Time::instance().nowNanos()));
+    thread_local std::mt19937 gen(std::chrono::steady_clock::now().time_since_epoch().count());
 
     uint32_t backoff = currentBackoffMs * 2;
 

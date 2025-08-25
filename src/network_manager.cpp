@@ -3,17 +3,17 @@
 #include "order_client.h"
 #include <iostream>
 #include <chrono>
-#include "time_source.h"
 #include <random>
 #include <algorithm>
 #include <thread>
 #include "metrics.h"
 
 NetworkManager::NetworkManager()
-                : marketClient(nullptr), orderClient(nullptr), running(false),
-                    marketReconnectDelay(1000), orderReconnectDelay(1000),
-                    lastMarketReconnect(std::chrono::steady_clock::now()),
-                    lastOrderReconnect(std::chrono::steady_clock::now()) {}
+        : marketClient(nullptr), orderClient(nullptr), running(false),
+            marketReconnectDelay(1000), orderReconnectDelay(1000),
+            lastMarketReconnect(std::chrono::steady_clock::now()),
+            lastOrderReconnect(std::chrono::steady_clock::now()) {
+}
 
 NetworkManager::~NetworkManager() {
     stop();
@@ -135,16 +135,12 @@ void NetworkManager::handleMarketData(const MessageHeader& header, const void* d
 }
 
 void NetworkManager::handlePeriodicTasks() {
-    static uint64_t lastCheckNs = Time::instance().nowNanos();
-    static uint64_t lastFlushNs = lastCheckNs;
-    uint64_t nowNs = Time::instance().nowNanos();
-    if (nowNs - lastCheckNs > 1000000000ULL) {
-        lastCheckNs = nowNs;
+    using clock = std::chrono::steady_clock;
+    static auto lastCheck = clock::now();
+    auto now = clock::now();
+    if (now - lastCheck > std::chrono::seconds(1)) {
+        lastCheck = now;
 
-    }
-    if (nowNs - lastFlushNs > 1000000000ULL) {
-        lastFlushNs = nowNs;
-        flushAllMetrics();
     }
 }
 
@@ -157,9 +153,9 @@ inline uint64_t applyJitter(uint64_t baseMs, uint32_t pctLow = 85, uint32_t pctH
 }
 
 void NetworkManager::tryReconnectMarket() {
-    auto now = std::chrono::steady_clock::now();
-    auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastMarketReconnect).count();
-    if (elapsedMs < (long long)marketReconnectDelay) return;
+    using clock = std::chrono::steady_clock;
+    auto now = clock::now();
+    if (now - lastMarketReconnect < std::chrono::milliseconds(marketReconnectDelay)) return;
     lastMarketReconnect = now;
     if (marketClient->reconnect()) {
         marketReconnectDelay = 1000;
@@ -174,9 +170,9 @@ void NetworkManager::tryReconnectMarket() {
 }
 
 void NetworkManager::tryReconnectOrder() {
-    auto now = std::chrono::steady_clock::now();
-    auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastOrderReconnect).count();
-    if (elapsedMs < (long long)orderReconnectDelay) return;
+    using clock = std::chrono::steady_clock;
+    auto now = clock::now();
+    if (now - lastOrderReconnect < std::chrono::milliseconds(orderReconnectDelay)) return;
     lastOrderReconnect = now;
     if (orderClient->reconnect()) {
         orderReconnectDelay = 1000;

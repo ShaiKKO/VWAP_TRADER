@@ -5,7 +5,7 @@
 #include <cstdint>
 
 namespace WireFormat {
-    constexpr size_t HEADER_SIZE = 2; // length(1)+type(1)
+    constexpr size_t HEADER_SIZE = 2;
     constexpr size_t QUOTE_SIZE = 32;
     constexpr size_t TRADE_SIZE = 24;
     constexpr size_t ORDER_SIZE = 25;

@@ -31,7 +31,7 @@ documentation/
 *.doc
 
 # Test directory
-# tests/
+tests/
 test/
 
 # Temporary files

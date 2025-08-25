@@ -7,7 +7,6 @@
 #include <cstdlib>
 #include <cmath>
 #include <chrono>
-#include "time_source.h"
 #include <random>
 #include <fstream>
 #include <sstream>
@@ -26,7 +25,7 @@ MarketDataSimulator::MarketDataSimulator(const SimulatorConfig& cfg)
     , running(false)
     , shouldStop(false)
     , serverSocket(-1)
-    , rngSeed(Time::instance().nowNanos())
+    , rngSeed(std::chrono::steady_clock::now().time_since_epoch().count())
     , currentBid(config.basePrice - 0.01)
     , currentAsk(config.basePrice + 0.01)
     , sequenceNumber(0) {
@@ -160,24 +159,25 @@ void MarketDataSimulator::acceptClients() {
 }
 
 void MarketDataSimulator::generateMarketData() {
-    uint64_t startTime = Time::instance().nowNanos();
-    uint64_t lastMessageTime = startTime;
+    auto startTime = std::chrono::steady_clock::now();
+    auto lastMessageTime = startTime;
 
     int messagesPerSec = std::max(1, std::min(10000, config.messagesPerSecond));
     int messageInterval = 1000000 / messagesPerSec;
 
     while (!shouldStop.load()) {
-    uint64_t now = Time::instance().nowNanos();
+        auto now = std::chrono::steady_clock::now();
 
         if (config.duration > 0) {
-        auto elapsed = (now - startTime) / 1000000000ULL;
+            auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - startTime).count();
             if (elapsed >= config.duration) {
                 shouldStop.store(true);
                 break;
             }
         }
 
-    auto timeSinceLastMessage = (now - lastMessageTime) / 1000ULL;
+        auto timeSinceLastMessage = std::chrono::duration_cast<std::chrono::microseconds>(
+            now - lastMessageTime).count();
 
         if (timeSinceLastMessage >= messageInterval) {
 
@@ -416,7 +416,9 @@ void MarketDataSimulator::broadcastMessage(const uint8_t* data, size_t size) {
 }
 
 uint64_t MarketDataSimulator::getCurrentTimestamp() {
-    return Time::instance().nowNanos();
+    auto now = std::chrono::system_clock::now();
+    auto duration = now.time_since_epoch();
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(duration).count();
 }
 
 void MarketDataSimulator::cleanup() {

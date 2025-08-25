@@ -1,7 +1,6 @@
 #include "vwap_calculator.h"
 #include "message.h"
 #include "metrics.h"
-#include "features.h"
 #include <iostream>
 #include <limits>
 #include <cassert>
@@ -18,16 +17,26 @@ namespace {
 }
 
 VwapCalculator::VwapCalculator(uint32_t windowSeconds) noexcept
-        : hotData{0, 0, 0.0, false},
-            windowDurationNanos(static_cast<uint64_t>(windowSeconds) * 1'000'000'000ULL),
-            timestamps(), quantities(), priceVolumes(), head(0), count(0), prefixGeneration(0),
-            windowStartTime(0), firstWindowComplete(false), lastTradeTime(0),
-            totalTradesProcessed(0), rejectedTrades(0) {}
+    : hotData{0, 0, 0.0, false},
+      windowDurationNanos(static_cast<uint64_t>(windowSeconds) * 1'000'000'000ULL),
+      tradeWindow(),
+    prefixVolume(),
+    prefixPriceVolume(),
+    #ifndef VWAP_DISABLE_TIME_INDEX
+    timeIndex(),
+    #endif
+    oldestIndex(0),
+    prefixGeneration(0),
+    pendingRebuild(false),
+      windowStartTime(0),
+      firstWindowComplete(false),
+      lastTradeTime(0),
+      totalTradesProcessed(0),
+      rejectedTrades(0) {}
 
 void VwapCalculator::addTrade(const TradeMessage& trade) noexcept {
 
-    // Reject zero or negative quantity or non-positive price explicitly; tests expect ignoring these
-    if (trade.price <= 0 || trade.quantity == 0) {
+    if (trade.price < 0 || trade.quantity == 0) {
         ++rejectedTrades;
         return;
     }
@@ -38,7 +47,7 @@ void VwapCalculator::addTrade(const TradeMessage& trade) noexcept {
         return;
     }
 
-    uint64_t ts = trade.timestamp;
+    const uint64_t ts = trade.timestamp;
     const uint32_t qty = trade.quantity;
     const int32_t  price = trade.price;
 
@@ -79,36 +88,17 @@ void VwapCalculator::addTrade(const TradeMessage& trade) noexcept {
 #endif
 
     if (windowStartTime == 0) windowStartTime = ts;
-    if (Features::ENABLE_VWAP_DELTA_TS) {
-        if (baseTimestamp == 0) baseTimestamp = ts; // establish base
-        // store delta in timestamps array (microsecond granularity) to extend effective range
-        uint64_t delta = ts - baseTimestamp;
-        uint64_t micro = delta / 1000ULL; // truncate to microseconds
-        ts = baseTimestamp + micro * 1000ULL; // normalized back to nearest micro
-    }
 
-    // (Removed oversized single-trade heuristic; rely on true overflow checks only.)
+    tradeWindow.push_back(VwapTradeRecord(ts, qty, price));
 
-    // Insert into SoA ring
-    size_t cap = MAX_TRADES;
-    if (count < cap) {
-        size_t pos = (head + count) % cap;
-    timestamps[pos] = ts;
-        quantities[pos] = qty;
-        priceVolumes[pos] = priceVolume;
-        ++count;
-    } else {
-        // overwrite oldest, adjust aggregates by removing oldest first
-        size_t oldestPos = head;
-        hotData.sumVolume      -= quantities[oldestPos];
-        hotData.sumPriceVolume -= priceVolumes[oldestPos];
-        // overwrite
-    timestamps[oldestPos] = ts;
-        quantities[oldestPos] = qty;
-        priceVolumes[oldestPos] = priceVolume;
-        head = (head + 1) % cap; // logical head moves forward
-        ++prefixGeneration; // signal structural overwrite
+    if (tradeWindow.full()) {
+        pendingRebuild = true;
     }
+    appendPrefix(qty, priceVolume);
+    size_t n = tradeWindow.size();
+    #ifndef VWAP_DISABLE_TIME_INDEX
+    if (n) timeIndex[n-1] = ts;
+    #endif
 
     hotData.sumPriceVolume = newPV;
     hotData.sumVolume      = newVol;
@@ -128,66 +118,88 @@ void VwapCalculator::addTrade(const TradeMessage& trade) noexcept {
 }
 
 void VwapCalculator::removeExpiredTrades(uint64_t currentTime) noexcept {
-    if (count == 0) return;
-    uint64_t cutoff = (currentTime > windowDurationNanos) ? (currentTime - windowDurationNanos) : 0;
-    size_t cap = MAX_TRADES;
-    if (timestamps[head] >= cutoff) return; // nothing to evict
-    bool evicted = false;
-    // Heuristic: start from lastEvictPos (virtual index) if still in range
-    size_t startVirtual = lastEvictPos < count ? lastEvictPos : 0;
-    // Advance while timestamp < cutoff
-    size_t v = startVirtual;
-    while (v < count) {
-        size_t pos = (head + v) % cap;
-        if (timestamps[pos] >= cutoff) break;
-        ++v;
-    }
-    if (v == 0) return; // heuristic found none
-    // Evict first v entries
-    for (size_t i = 0; i < v; ++i) {
-        size_t pos = (head + i) % cap;
-        hotData.sumVolume      -= quantities[pos];
-        hotData.sumPriceVolume -= priceVolumes[pos];
-    }
-    head = (head + v) % cap;
-    count -= v;
-    evicted = (v != 0);
-    if (v > 0) {
-        // retain fraction of evicted span as next heuristic start (temporal locality)
-        size_t retained = v / 4; // 25%
-        lastEvictPos = retained < count ? retained : 0;
-    } else {
-        lastEvictPos = 0;
-    }
-    if (evicted) {
-        if (count == 0) {
-            windowStartTime = 0;
-            hotData.sumVolume = 0;
-            hotData.sumPriceVolume = 0;
-        } else {
-            windowStartTime = timestamps[head];
-        }
-        hotData.vwapCacheValid = false;
-        ++prefixGeneration;
-    }
-}
+    const uint64_t cutoff = (currentTime > windowDurationNanos)
+        ? (currentTime - windowDurationNanos)
+        : 0;
+    if (tradeWindow.empty()) return;
 
-uint32_t VwapCalculator::lowerBoundTime(uint64_t cutoff) const noexcept {
-    // Binary search over ring via virtual indexing
-    size_t n = count;
+    if (tradeWindow.front().timestamp >= cutoff) return;
+
+    size_t n = tradeWindow.size();
+
+    if (pendingRebuild) rebuildPrefixes();
+
     size_t lo = 0, hi = n;
     while (lo < hi) {
         size_t mid = (lo + hi) / 2;
-        size_t pos = (head + mid) % MAX_TRADES;
-        uint64_t ts = timestamps[pos];
-        if (ts < cutoff) lo = mid + 1; else hi = mid;
+        if (tradeWindow[mid].timestamp < cutoff) lo = mid + 1; else hi = mid;
     }
+    size_t removeCount = lo;
+    if (removeCount == 0) return;
+    uint64_t volRemoved = prefixVolume[removeCount-1];
+    uint64_t pvRemoved  = prefixPriceVolume[removeCount-1];
+
+    for (size_t i=0;i<removeCount;++i) tradeWindow.pop_front();
+    hotData.sumVolume      -= volRemoved;
+    hotData.sumPriceVolume -= pvRemoved;
+
+    size_t newN = tradeWindow.size();
+    if (newN) {
+
+        std::memmove(prefixVolume.data(), prefixVolume.data() + removeCount, newN * sizeof(uint64_t));
+        std::memmove(prefixPriceVolume.data(), prefixPriceVolume.data() + removeCount, newN * sizeof(uint64_t));
+        #ifndef VWAP_DISABLE_TIME_INDEX
+        std::memmove(timeIndex.data(), timeIndex.data() + removeCount, newN * sizeof(uint64_t));
+        #endif
+        for (size_t i=0;i<newN; ++i) {
+            prefixVolume[i]      -= volRemoved;
+            prefixPriceVolume[i] -= pvRemoved;
+        }
+    }
+    oldestIndex += removeCount;
+    if (oldestIndex > 10u * MAX_TRADES) oldestIndex = MAX_TRADES;
+    if (tradeWindow.empty()) {
+        hotData.sumVolume = 0; hotData.sumPriceVolume = 0; windowStartTime = 0;
+    } else {
+        windowStartTime = tradeWindow.front().timestamp;
+    }
+    hotData.vwapCacheValid = false;
+}
+
+void VwapCalculator::rebuildPrefixes() noexcept {
+    size_t n = tradeWindow.size();
+    uint64_t v=0, pv=0;
+    for (size_t i=0;i<n;++i) {
+        const auto& tr = tradeWindow[i];
+        v += tr.quantity; pv += tr.priceVolume;
+        prefixVolume[i] = v; prefixPriceVolume[i] = pv;
+        #ifndef VWAP_DISABLE_TIME_INDEX
+        timeIndex[i] = tr.timestamp;
+        #endif
+    }
+    pendingRebuild = false;
+    ++prefixGeneration;
+}
+
+void VwapCalculator::appendPrefix(uint32_t qty, uint64_t pv) noexcept {
+    size_t n = tradeWindow.size();
+    if (n==0) return;
+    uint64_t prevV = (n>1)?prefixVolume[n-2]:0;
+    uint64_t prevPV = (n>1)?prefixPriceVolume[n-2]:0;
+    prefixVolume[n-1] = prevV + qty;
+    prefixPriceVolume[n-1] = prevPV + pv;
+}
+
+uint32_t VwapCalculator::lowerBoundTime(uint64_t cutoff) const noexcept {
+    size_t n = tradeWindow.size();
+    size_t lo=0, hi=n;
+    while (lo<hi) { size_t mid=(lo+hi)/2; if (tradeWindow[mid].timestamp < cutoff) lo=mid+1; else hi=mid; }
     return static_cast<uint32_t>(lo);
 }
 
 void VwapCalculator::printStatistics() const noexcept {
     std::cout << "\n=== VWAP Stats ===\n"
-              << "Window Trades: " << count << "\n"
+              << "Window Trades: " << tradeWindow.size() << "\n"
               << "Total Trades:  " << totalTradesProcessed << "\n"
               << "Rejected:      " << rejectedTrades << "\n"
               << "VWAP ($):      " << (getCurrentVwap() / 100.0) << "\n"

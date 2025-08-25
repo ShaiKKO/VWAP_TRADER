@@ -6,7 +6,6 @@
 #include <cerrno>
 #include <cstring>
 #include "metrics.h"
-#include "features.h"
 
 OrderClient::OrderClient(const std::string& host, uint16_t port)
     : TcpClient(host, port) {
@@ -66,11 +65,6 @@ bool OrderClient::sendOrder(const OrderMessage& order) noexcept {
 void OrderClient::processSendQueue() noexcept {
     std::lock_guard<std::mutex> lock(queueMutex);
 
-    if (Features::ENABLE_WRITEV_BATCHING) {
-        if (qSize > 1) { flushBatch(); return; }
-        // fall through to single-send loop for 0/1 pending
-    }
-
     while (!empty() && state == ConnectionState::CONNECTED) {
         auto& pending = front();
         size_t remaining = pending.length - pending.offset;
@@ -98,36 +92,5 @@ void OrderClient::processSendQueue() noexcept {
                 break;
             }
         }
-    }
-}
-
-void OrderClient::flushBatch() noexcept {
-    if (empty() || state != ConnectionState::CONNECTED) return;
-    static const size_t MAX_IOV = 16; // tune
-    struct iovec iov[MAX_IOV];
-    size_t n = 0; size_t idx = qHead;
-    while (n < MAX_IOV && n < qSize) {
-        PendingSend& ps = queue[idx];
-        size_t rem = ps.length - ps.offset;
-        if (rem == 0) { idx = (idx + 1) % QUEUE_CAPACITY; continue; }
-        iov[n].iov_base = ps.data.data() + ps.offset;
-        iov[n].iov_len = rem;
-        ++n; idx = (idx + 1) % QUEUE_CAPACITY;
-    }
-    if (n == 0) return;
-    int sock = getSocketFd();
-    if (sock < 0) return;
-    ssize_t sent = ::writev(sock, iov, static_cast<int>(n));
-    if (sent < 0) {
-        if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) return; // try later
-        if (errno == EPIPE || errno == ECONNRESET) { state = ConnectionState::DISCONNECTED; while (!empty()) popFront(); }
-        return;
-    }
-    size_t remainingSent = static_cast<size_t>(sent);
-    while (remainingSent && !empty()) {
-        PendingSend& ps = front();
-        size_t rem = ps.length - ps.offset;
-        if (remainingSent >= rem) { remainingSent -= rem; popFront(); }
-        else { ps.offset += remainingSent; remainingSent = 0; }
     }
 }

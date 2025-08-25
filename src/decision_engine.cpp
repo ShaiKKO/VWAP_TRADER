@@ -3,13 +3,7 @@
 #include <iomanip>
 #include <cstring>
 #include <chrono>
-#include "time_source.h"
 #include "metrics.h"
-#include "features.h"
-#include <cstdlib>
-
-// Out-of-line definition for static constexpr array (needed for some linkers/tests referencing symbol)
-constexpr uint64_t DecisionEngine::LAT_THRESHOLDS[DecisionEngine::LAT_BUCKETS];
 
 bool DecisionEngine::QuoteIdentifier::operator==(const QuoteIdentifier& other) const noexcept {
     return timestamp == other.timestamp &&
@@ -18,16 +12,20 @@ bool DecisionEngine::QuoteIdentifier::operator==(const QuoteIdentifier& other) c
 }
 
 DecisionEngine::DecisionEngine(const std::string& symbol, char side, uint32_t maxOrderSize, uint64_t cooldownNanos)
-                : symbol(symbol), side(side), maxOrderSize(maxOrderSize), currentState(TradingState::WAITING_FOR_FIRST_WINDOW),
-                    lastProcessedQuote{0,0,0}, lastOrderTimestamp(0), cooldownNanos(cooldownNanos), quotesProcessed(0), ordersTriggered(0),
-                    ordersRejected(0), rejWaitingWindow(0), rejPriceUnfavorable(0), rejCooldown(0), rejDuplicate(0) {
-        triggerPredicate = (side=='B') ? +[](double price,double v){ return price < v; } : +[](double price,double v){ return price > v; };
-        const char* env = std::getenv("VWAP_SPIKE_THRESHOLD_NS");
-        if (env) {
-            uint64_t v = std::strtoull(env, nullptr, 10);
-            if (v > 0) spikeThresholdNanos = v;
-        }
-}
+        : symbol(symbol),
+            side(side),
+            maxOrderSize(maxOrderSize),
+            currentState(TradingState::WAITING_FOR_FIRST_WINDOW),
+            lastProcessedQuote{0, 0, 0},
+            lastOrderTimestamp(0),
+            cooldownNanos(cooldownNanos),
+            quotesProcessed(0),
+            ordersTriggered(0),
+            ordersRejected(0),
+            rejWaitingWindow(0),
+            rejPriceUnfavorable(0),
+            rejCooldown(0),
+            rejDuplicate(0) {}
 
 void DecisionEngine::onVwapWindowComplete() {
     if (currentState == TradingState::WAITING_FOR_FIRST_WINDOW) {
@@ -36,63 +34,123 @@ void DecisionEngine::onVwapWindowComplete() {
     }
 }
 
-bool DecisionEngine::evaluateQuote(const QuoteMessage& quote, double vwap, OrderMessage& outOrder) noexcept {
+Optional<OrderMessage> DecisionEngine::evaluateQuote(const QuoteMessage& quote, double vwap) {
     quotesProcessed++;
     extern SystemMetrics g_systemMetrics;
     g_systemMetrics.hot.quotesProcessed.fetch_add(1, std::memory_order_relaxed);
-    uint64_t start = Time::instance().nowNanos();
+    auto wallStart = std::chrono::steady_clock::now();
     uint64_t currentTime = quote.timestamp;
+    struct LatencyScope {
+        std::chrono::steady_clock::time_point start;
+        ~LatencyScope() {
+            auto end = std::chrono::steady_clock::now();
+            uint64_t nanos = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count());
+            if (nanos > 0) g_metricsView.updateLatency(nanos);
+        }
+    } scope{wallStart};
 
-    // Combined early rejection bitmask: bit0 waiting window, bit1 duplicate, bit2 cooldown
-    uint32_t rejectMask = 0;
-    if (currentState == TradingState::WAITING_FOR_FIRST_WINDOW) rejectMask |= 1u;
-    if (!rejectMask && isDuplicateQuote(quote)) rejectMask |= 2u; // do not even test duplicate if already waiting
-    if (!rejectMask && isInCooldown(currentTime)) rejectMask |= 4u;
-    if (rejectMask) {
-        Decision d{}; d.timestamp=currentTime; d.vwap=vwap; d.quotePrice=0.0; d.quoteSize=0; d.orderSize=0;
-        if (rejectMask & 1u) { d.type=Decision::REJECTED_WAITING_WINDOW; ++ordersRejected; ++rejWaitingWindow; std::snprintf(d.reason, Decision::REASON_MAX, "%s", "Waiting for first VWAP window"); }
-        else if (rejectMask & 2u) { d.type=Decision::REJECTED_DUPLICATE; ++ordersRejected; ++rejDuplicate; std::snprintf(d.reason, Decision::REASON_MAX, "%s", "Duplicate quote"); }
-        else { d.type=Decision::REJECTED_COOLDOWN; ++ordersRejected; ++rejCooldown; std::snprintf(d.reason, Decision::REASON_MAX, "%s", "In cooldown period"); }
-        recordDecision(d);
-        uint64_t end = Time::instance().nowNanos();
-        uint64_t nanos = end - start; evalLatencyLastNanos = nanos; if (nanos>evalLatencyMaxNanos) evalLatencyMaxNanos=nanos; g_metricsView.updateLatency(nanos);
-        // bucket
-        size_t idx=0; while (idx < LAT_BUCKETS && nanos <= LAT_THRESHOLDS[idx]) { latencyBucketCounts[idx]++; goto latency_done; } for (; idx < LAT_BUCKETS; ++idx){} latencyBucketCounts[LAT_BUCKETS]++; latency_done:;
-        if (nanos > spikeThresholdNanos && !Features::ENABLE_BENCHMARK_SUPPRESS_LOG) std::cerr << "[EVAL SPIKE] earlyReject " << nanos << " ns" << std::endl;
-        return false;
+    if (currentState == TradingState::WAITING_FOR_FIRST_WINDOW) {
+    recordDecision({
+            Decision::REJECTED_WAITING_WINDOW,
+            currentTime,
+            0.0,
+            vwap,
+            0,
+            0,
+            "Waiting for first VWAP window"
+        });
+    ++ordersRejected; ++rejWaitingWindow;
+    return Optional<OrderMessage>();
     }
 
-    double relevantPrice = (side == 'B') ? quote.askPrice : quote.bidPrice;
-    uint32_t relevantQuantity = (side == 'B') ? quote.askQuantity : quote.bidQuantity;
+    if (isDuplicateQuote(quote)) {
+    recordDecision({
+            Decision::REJECTED_DUPLICATE,
+            currentTime,
+            0.0,
+            vwap,
+            0,
+            0,
+            "Duplicate quote"
+        });
+    ++ordersRejected; ++rejDuplicate;
+    return Optional<OrderMessage>();
+    }
+
+    if (isInCooldown(currentTime)) {
+    recordDecision({
+            Decision::REJECTED_COOLDOWN,
+            currentTime,
+            0.0,
+            vwap,
+            0,
+            0,
+            "In cooldown period"
+        });
+    ++ordersRejected; ++rejCooldown;
+    return Optional<OrderMessage>();
+    }
+
+    double relevantPrice;
+    uint32_t relevantQuantity;
+
+    if (side == 'B') {
+        relevantPrice = quote.askPrice;
+        relevantQuantity = quote.askQuantity;
+    } else {
+        relevantPrice = quote.bidPrice;
+        relevantQuantity = quote.bidQuantity;
+    }
 
     if (!shouldTriggerOrder(quote, vwap)) {
-        Decision d{}; d.type=Decision::REJECTED_PRICE_UNFAVORABLE; d.timestamp=currentTime; d.quotePrice=relevantPrice; d.vwap=vwap; d.quoteSize=relevantQuantity; d.orderSize=0;
-        // snprintf only for this branch; cheap but still skip for earlier returns
-        std::snprintf(d.reason, Decision::REASON_MAX, "%s", (side=='B'?"Ask >= VWAP":"Bid <= VWAP"));
-        recordDecision(d); ++ordersRejected; ++rejPriceUnfavorable;
-        uint64_t end = Time::instance().nowNanos(); uint64_t nanos = end - start; evalLatencyLastNanos = nanos; if (nanos>evalLatencyMaxNanos) evalLatencyMaxNanos=nanos; g_metricsView.updateLatency(nanos);
-        size_t idx=0; while (idx < LAT_BUCKETS && nanos <= LAT_THRESHOLDS[idx]) { latencyBucketCounts[idx]++; goto latency_done2; } for (; idx < LAT_BUCKETS; ++idx){} latencyBucketCounts[LAT_BUCKETS]++; latency_done2:;
-        if (nanos > spikeThresholdNanos && !Features::ENABLE_BENCHMARK_SUPPRESS_LOG) std::cerr << "[EVAL SPIKE] priceReject " << nanos << " ns" << std::endl;
-        return false;
+    recordDecision({
+            Decision::REJECTED_PRICE_UNFAVORABLE,
+            currentTime,
+            relevantPrice,
+            vwap,
+            relevantQuantity,
+            0,
+            side == 'B' ? "Ask >= VWAP" : "Bid <= VWAP"
+        });
+    ++ordersRejected; ++rejPriceUnfavorable;
+    return Optional<OrderMessage>();
     }
 
     uint32_t orderSize = calculateOrderSize(relevantQuantity);
+
     OrderMessage order = buildOrder(quote, orderSize);
-    currentState = TradingState::ORDER_SENT; lastOrderTimestamp = currentTime;
+
+    currentState = TradingState::ORDER_SENT;
+    lastOrderTimestamp = currentTime;
     lastProcessedQuote = {quote.timestamp, static_cast<int32_t>(relevantPrice), relevantQuantity};
 
-    Decision d{}; d.type=Decision::ORDER_TRIGGERED; d.timestamp=currentTime; d.quotePrice=relevantPrice; d.vwap=vwap; d.quoteSize=relevantQuantity; d.orderSize=orderSize;
-    std::snprintf(d.reason, Decision::REASON_MAX, "%s", (side=='B'?"Buy: Ask < VWAP":"Sell: Bid > VWAP"));
-    recordDecision(d); ordersTriggered++; currentState = TradingState::READY_TO_TRADE; outOrder = order; lastQuoteFingerprint = fingerprint(quote.timestamp, static_cast<int32_t>(relevantPrice), relevantQuantity);
+    recordDecision({
+        Decision::ORDER_TRIGGERED,
+        currentTime,
+        relevantPrice,
+        vwap,
+        relevantQuantity,
+        orderSize,
+        side == 'B' ? "Buy: Ask < VWAP" : "Sell: Bid > VWAP"
+    });
 
-    uint64_t end = Time::instance().nowNanos(); uint64_t nanos = end - start; evalLatencyLastNanos = nanos; if (nanos>evalLatencyMaxNanos) evalLatencyMaxNanos=nanos; g_metricsView.updateLatency(nanos);
-    size_t idx=0; while (idx < LAT_BUCKETS && nanos <= LAT_THRESHOLDS[idx]) { latencyBucketCounts[idx]++; goto latency_done3; } for (; idx < LAT_BUCKETS; ++idx){} latencyBucketCounts[LAT_BUCKETS]++; latency_done3:;
-    if (nanos > spikeThresholdNanos && !Features::ENABLE_BENCHMARK_SUPPRESS_LOG) std::cerr << "[EVAL SPIKE] trigger " << nanos << " ns" << std::endl;
-    return true;
+    ordersTriggered++;
+
+    currentState = TradingState::READY_TO_TRADE;
+
+    return Optional<OrderMessage>(order);
 }
 
 bool DecisionEngine::shouldTriggerOrder(const QuoteMessage& quote, double vwap) const noexcept {
-    if (vwap <= 0) return false; double price = (side=='B') ? quote.askPrice : quote.bidPrice; return triggerPredicate(price, vwap);
+    if (vwap <= 0) {
+        return false;
+    }
+
+    if (side == 'B') {
+        return static_cast<double>(quote.askPrice) < vwap;
+    } else {
+        return static_cast<double>(quote.bidPrice) > vwap;
+    }
 }
 
 uint32_t DecisionEngine::calculateOrderSize(uint32_t quoteSize) const noexcept {
@@ -100,10 +158,15 @@ uint32_t DecisionEngine::calculateOrderSize(uint32_t quoteSize) const noexcept {
 }
 
 bool DecisionEngine::isDuplicateQuote(const QuoteMessage& quote) const noexcept {
-    int32_t p = (side=='B') ? static_cast<int32_t>(quote.askPrice) : static_cast<int32_t>(quote.bidPrice);
-    uint32_t q = (side=='B') ? quote.askQuantity : quote.bidQuantity;
-    uint64_t fp = fingerprint(quote.timestamp, p, q);
-    return fp == lastQuoteFingerprint;
+    QuoteIdentifier current;
+
+    if (side == 'B') {
+        current = {quote.timestamp, static_cast<int32_t>(quote.askPrice), quote.askQuantity};
+    } else {
+        current = {quote.timestamp, static_cast<int32_t>(quote.bidPrice), quote.bidQuantity};
+    }
+
+    return current == lastProcessedQuote;
 }
 
 bool DecisionEngine::isInCooldown(uint64_t currentTime) const noexcept {
@@ -113,17 +176,13 @@ bool DecisionEngine::isInCooldown(uint64_t currentTime) const noexcept {
     return (currentTime - lastOrderTimestamp) < cooldownNanos;
 }
 
-void DecisionEngine::recordDecision(const Decision& decision) noexcept {
-    size_t pos;
-    if (historyCount < MAX_HISTORY_SIZE) {
-        pos = (historyHead + historyCount) % MAX_HISTORY_SIZE;
-        ++historyCount;
-    } else {
-        // overwrite oldest
-        pos = historyHead;
-        historyHead = (historyHead + 1) % MAX_HISTORY_SIZE;
+void DecisionEngine::recordDecision(const Decision& decision) {
+    decisionHistory.push_back(decision);
+
+    while (decisionHistory.size() > MAX_HISTORY_SIZE) {
+        decisionHistory.pop_front();
     }
-    decisionHistory[pos] = decision;
+
     if (decision.type == Decision::ORDER_TRIGGERED) {
         std::cout << "[ORDER] "
                   << (side == 'B' ? "BUY" : "SELL")
@@ -191,11 +250,5 @@ void DecisionEngine::printStatistics() const {
         std::cout << "Trigger Rate: " << std::fixed << std::setprecision(2)
                   << triggerRate << "%" << std::endl;
     }
-    std::cout << "Eval Latency Max(ns): " << evalLatencyMaxNanos << " Last(ns): " << evalLatencyLastNanos << " SpikeThresh(ns): " << spikeThresholdNanos << std::endl;
-    std::cout << "Buckets(ns <=): ";
-    for (size_t i=0;i<LAT_BUCKETS;++i) {
-        std::cout << LAT_THRESHOLDS[i] << ":" << latencyBucketCounts[i] << " ";
-    }
-    std::cout << ">" << LAT_THRESHOLDS[LAT_BUCKETS-1] << ":" << latencyBucketCounts[LAT_BUCKETS] << std::endl;
     std::cout << "=================================" << std::endl;
 }

@@ -9,8 +9,8 @@
 #include "vwap_calculator.h"
 #include "order_manager.h"
 #include "message_buffer.h"
+#include "memory_pool.h"
 #include "circular_buffer.h"
-#include "features.h"
 
 using namespace std::chrono;
 
@@ -31,11 +31,6 @@ private:
         double maxLatencyUs;
         size_t totalMessages;
         double throughput;
-    // Fixed histogram (no dynamic alloc)
-    static const int HIST_BUCKETS = 32;
-    uint64_t latencyHist[HIST_BUCKETS];
-    bool histValid = false;
-    double p999LatencyUs;
     };
 
 public:
@@ -217,38 +212,21 @@ private:
     }
 
     void benchmarkMemoryAllocations() {
-        const size_t NUM_ALLOCS = 200000;
-        volatile uint64_t checksum = 0;
+        const size_t NUM_ALLOCS = 100000;
+
         auto start = high_resolution_clock::now();
         for (size_t i = 0; i < NUM_ALLOCS; ++i) {
-            auto* vec = new std::vector<uint8_t>(256, static_cast<uint8_t>(i));
-            // touch memory to force actual allocation backing pages
-            checksum += (*vec)[i % 256];
+            std::vector<uint8_t>* vec = new std::vector<uint8_t>(256);
             delete vec;
         }
         auto end = high_resolution_clock::now();
         double dynamicTimeUs = duration<double, std::micro>(end - start).count();
-        double perAlloc = dynamicTimeUs / NUM_ALLOCS;
-        double opsPerSec = NUM_ALLOCS / (dynamicTimeUs / 1'000'000.0);
-    // Fixed-size pool
-    struct Node { uint8_t data[256]; Node* next; };
-    std::vector<Node*> nodes; nodes.reserve(NUM_ALLOCS);
-    Node* freeList = nullptr;
-    auto poolAlloc = [&](){ if (freeList){ Node* n=freeList; freeList=freeList->next; return n;} return new Node(); };
-    auto poolFree = [&](Node* n){ n->next = freeList; freeList = n; };
-    auto startPool = high_resolution_clock::now();
-    for (size_t i=0;i<NUM_ALLOCS;++i){ Node* n=poolAlloc(); n->data[i%256]=static_cast<uint8_t>(i); checksum += n->data[i%256]; poolFree(n);}        
-    auto endPool = high_resolution_clock::now();
-    double poolTimeUs = duration<double, std::micro>(endPool - startPool).count();
-    double poolPer = poolTimeUs / NUM_ALLOCS;
-    double poolOps = NUM_ALLOCS / (poolTimeUs / 1'000'000.0);
-        std::cout << "Allocation Type    | Time (µs) | Ops/sec" << std::endl;
-        std::cout << "-------------------|-----------|----------" << std::endl;
-        std::cout << "Dynamic (new/del)  | " << std::setw(9) << std::fixed << std::setprecision(2)
-                  << perAlloc << " | " << std::setw(8) << static_cast<size_t>(opsPerSec) << std::endl;
-    std::cout << "Pool (free list)   | " << std::setw(9) << std::fixed << std::setprecision(2)
-          << poolPer << " | " << std::setw(8) << static_cast<size_t>(poolOps) << std::endl;
-        (void)checksum; // prevent optimization
+
+    std::cout << "Allocation Type    | Time (µs) | Ops/sec" << std::endl;
+    std::cout << "-------------------|-----------|----------" << std::endl;
+    std::cout << "Dynamic (new/del)  | " << std::setw(9) << std::fixed << std::setprecision(2)
+          << dynamicTimeUs / NUM_ALLOCS << " | "
+          << std::setw(8) << static_cast<size_t>(NUM_ALLOCS / (dynamicTimeUs / 1000000.0)) << std::endl;
     }
 
     BenchmarkResult benchmarkEndToEnd() {
@@ -319,27 +297,10 @@ private:
         result.p95LatencyUs = latencies[latencies.size() * 0.95];
         result.p99LatencyUs = latencies[latencies.size() * 0.99];
         result.maxLatencyUs = latencies.back();
-        if (latencies.size() >= 1000) {
-            size_t idx999 = static_cast<size_t>(latencies.size() * 0.999);
-            if (idx999 >= latencies.size()) idx999 = latencies.size()-1;
-            result.p999LatencyUs = latencies[idx999];
-        } else {
-            result.p999LatencyUs = result.p99LatencyUs; // fallback
-        }
 
         double totalTimeSeconds = duration<double>(endTotal - startTotal).count();
         result.throughput = latencies.size() / totalTimeSeconds;
 
-        if (Features::ENABLE_LATENCY_HISTOGRAM) {
-            std::memset(result.latencyHist, 0, sizeof(result.latencyHist));
-            for (double us : latencies) {
-                int idx;
-                if (us < 10.0) idx = static_cast<int>(us); else if (us < 100.0) idx = 10 + static_cast<int>((us-10.0)/10.0); else idx = BenchmarkResult::HIST_BUCKETS-1;
-                if (idx >= BenchmarkResult::HIST_BUCKETS) idx = BenchmarkResult::HIST_BUCKETS-1;
-                result.latencyHist[idx]++;
-            }
-            result.histValid = true;
-        }
         return result;
     }
 
@@ -350,17 +311,9 @@ private:
         std::cout << "  P50 latency:     " << result.p50LatencyUs << " µs" << std::endl;
         std::cout << "  P95 latency:     " << result.p95LatencyUs << " µs" << std::endl;
         std::cout << "  P99 latency:     " << result.p99LatencyUs << " µs" << std::endl;
-    std::cout << "  P99.9 latency:   " << result.p999LatencyUs << " µs" << std::endl;
         std::cout << "  Max latency:     " << result.maxLatencyUs << " µs" << std::endl;
         std::cout << "  Throughput:      " << std::fixed << std::setprecision(1)
                   << (result.throughput / 1000000.0) << " M msg/sec" << std::endl;
-        if (Features::ENABLE_LATENCY_HISTOGRAM && result.histValid) {
-            std::cout << "  Latency histogram (bucketed):" << std::endl;
-            for (int i=0;i<BenchmarkResult::HIST_BUCKETS;++i) {
-                if (result.latencyHist[i]==0) continue;
-                std::cout << "    B" << i << ": " << result.latencyHist[i] << std::endl;
-            }
-        }
     }
 
     void printComparison(const std::string& name,
@@ -400,7 +353,7 @@ private:
         std::cout << "=========================================" << std::endl;
         std::cout << "✓ Stack-based message types eliminate allocations" << std::endl;
         std::cout << "✓ Circular buffer for VWAP maintains O(1) operations" << std::endl;
-    std::cout << "✓ Zero-copy message parsing avoids redundant copies" << std::endl;
+        std::cout << "✓ Memory pools reduce allocation overhead" << std::endl;
         std::cout << "✓ Move semantics prevent unnecessary copies" << std::endl;
         std::cout << "✓ Cached VWAP values reduce redundant calculations" << std::endl;
         std::cout << "✓ Batch processing for expired trades" << std::endl;

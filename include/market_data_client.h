@@ -10,9 +10,6 @@ class MarketDataClient : public TcpClient {
 private:
     MessageBuffer receiveBuffer;
     std::function<void(const MessageHeader&, const void*)> messageCallback;
-    struct BackpressureState {
-        bool inHardPause = false; // per-connection hard watermark pause flag
-    } backpressure;
 
 public:
     MarketDataClient(const std::string& host, uint16_t port);

@@ -5,7 +5,6 @@
 #include <iostream>
 #include <iomanip>
 #include <sstream>
-#include "time_source.h"
 
 CSVReader::CSVReader(const std::string& path)
     : filePath(path), currentIndex(0), isLoaded(false),
@@ -213,8 +212,8 @@ CSVReplayEngine::CSVReplayEngine(std::unique_ptr<CSVReader> csvReader, double sp
 }
 
 void CSVReplayEngine::start() noexcept {
-    startTimeNs = Time::instance().nowNanos();
-    lastEmitTimeNs = startTimeNs;
+    startTime = std::chrono::steady_clock::now();
+    lastEmitTime = startTime;
     currentPosition = 0;
     isPaused = false;
 }
@@ -229,7 +228,7 @@ bool CSVReplayEngine::getNextMessage(MarketDataRecord& record) {
     if (shouldEmitNow(nextRecord)) {
         record = nextRecord;
         currentPosition++;
-    lastEmitTimeNs = Time::instance().nowNanos();
+        lastEmitTime = std::chrono::steady_clock::now();
         return true;
     }
 
@@ -239,8 +238,10 @@ bool CSVReplayEngine::getNextMessage(MarketDataRecord& record) {
 bool CSVReplayEngine::shouldEmitNow(const MarketDataRecord& record) const {
     if (replaySpeed <= 0) return true;
 
-    uint64_t nowNs = Time::instance().nowNanos();
-    if (nowNs - lastEmitTimeNs < static_cast<uint64_t>(MIN_INTERVAL.count()) * 1000ULL) {
+    auto now = std::chrono::steady_clock::now();
+    auto timeSinceLastEmit = now - lastEmitTime;
+
+    if (timeSinceLastEmit < MIN_INTERVAL) {
         return false;
     }
 
@@ -252,8 +253,9 @@ bool CSVReplayEngine::shouldEmitNow(const MarketDataRecord& record) const {
 }
 
 uint64_t CSVReplayEngine::getElapsedMicros() const noexcept {
-    uint64_t nowNs = Time::instance().nowNanos();
-    return (nowNs - startTimeNs) / 1000ULL;
+    auto now = std::chrono::steady_clock::now();
+    auto elapsed = now - startTime;
+    return std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count();
 }
 
 uint64_t CSVReplayEngine::getReplayTimestamp(uint64_t originalTimestamp) const noexcept {

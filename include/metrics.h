@@ -48,24 +48,23 @@ struct alignas(CACHE_LINE_SIZE) ColdMetrics {
     std::atomic<uint64_t> connectionsClosed;
     std::atomic<uint64_t> connectionErrors;
     
+    std::atomic<uint64_t> queueHighWater;
     std::atomic<uint64_t> messagesDropped;
+    
     std::atomic<uint64_t> completedSends;
     std::atomic<uint64_t> partialSends;
-    std::atomic<uint64_t> bufferNearCapacityEvents;
-    std::atomic<uint64_t> hardWatermarkEvents; // transitions into hard watermark state
-    // Removed queueHighWater to keep footprint in one line (can be tracked via external sampler if needed)
-    static constexpr size_t PAD_BYTES_COLD = (CACHE_LINE_SIZE - 8 * sizeof(std::atomic<uint64_t>));
-    unsigned char _padding[PAD_BYTES_COLD ? PAD_BYTES_COLD : 1];
+    
+    static constexpr size_t PAD_BYTES_COLD = (CACHE_LINE_SIZE - 7 * sizeof(std::atomic<uint64_t>));
+    unsigned char _padding[PAD_BYTES_COLD];
     
     ColdMetrics() noexcept {
         connectionsAccepted = 0;
         connectionsClosed = 0;
         connectionErrors = 0;
+        queueHighWater = 0;
         messagesDropped = 0;
         completedSends = 0;
         partialSends = 0;
-    bufferNearCapacityEvents = 0;
-    hardWatermarkEvents = 0;
         std::memset(_padding, 0, sizeof(_padding));
     }
     
@@ -73,11 +72,10 @@ struct alignas(CACHE_LINE_SIZE) ColdMetrics {
         connectionsAccepted = 0;
         connectionsClosed = 0;
         connectionErrors = 0;
+        queueHighWater = 0;
         messagesDropped = 0;
         completedSends = 0;
         partialSends = 0;
-    bufferNearCapacityEvents = 0;
-    hardWatermarkEvents = 0;
     }
 };
 
@@ -142,15 +140,12 @@ struct LatencyHistogram {
     std::atomic<uint64_t> buckets[BUCKETS];
     LatencyHistogram() noexcept { for (size_t i=0;i<BUCKETS;++i) buckets[i]=0; }
     void record(uint64_t nanos) noexcept {
-        if (nanos == 0) {
-            buckets[0].fetch_add(1, std::memory_order_relaxed);
-            return;
+        uint64_t v = nanos;
+        size_t idx = 21;
+        for (size_t b=0;b<21;++b) {
+            if (v < (1ull<<b)) { idx = b; break; }
         }
-        // Find highest bit position; bucket = position (capped)
-        unsigned leading = __builtin_clzll(nanos);
-        unsigned msbIndex = 63u - leading; // 0-based position
-        size_t bucket = (msbIndex < BUCKETS-1) ? msbIndex : (BUCKETS-1);
-        buckets[bucket].fetch_add(1, std::memory_order_relaxed);
+        buckets[idx].fetch_add(1, std::memory_order_relaxed);
     }
     void reset() noexcept { for (size_t i=0;i<BUCKETS;++i) buckets[i]=0; }
 };
@@ -166,11 +161,10 @@ struct MetricsSnapshot {
     uint64_t connectionsAccepted;
     uint64_t connectionsClosed;
     uint64_t connectionErrors;
+    uint64_t queueHighWater;
     uint64_t messagesDropped;
     uint64_t completedSends;
     uint64_t partialSends;
-    uint64_t bufferNearCapacityEvents;
-    uint64_t hardWatermarkEvents;
     uint64_t failedSends;
     uint64_t minLatency;
     uint64_t maxLatency;
@@ -191,11 +185,10 @@ struct MetricsSnapshot {
         s.connectionsAccepted = m.cold.connectionsAccepted.load(std::memory_order_relaxed);
         s.connectionsClosed   = m.cold.connectionsClosed.load(std::memory_order_relaxed);
         s.connectionErrors    = m.cold.connectionErrors.load(std::memory_order_relaxed);
+        s.queueHighWater      = m.cold.queueHighWater.load(std::memory_order_relaxed);
         s.messagesDropped     = m.cold.messagesDropped.load(std::memory_order_relaxed);
         s.completedSends      = m.cold.completedSends.load(std::memory_order_relaxed);
         s.partialSends        = m.cold.partialSends.load(std::memory_order_relaxed);
-    s.bufferNearCapacityEvents = m.cold.bufferNearCapacityEvents.load(std::memory_order_relaxed);
-        s.hardWatermarkEvents = m.cold.hardWatermarkEvents.load(std::memory_order_relaxed);
         s.failedSends         = m.perf.failedSends.load(std::memory_order_relaxed);
         s.minLatency          = m.perf.minLatency.load(std::memory_order_relaxed);
         s.maxLatency          = m.perf.maxLatency.load(std::memory_order_relaxed);
@@ -216,16 +209,15 @@ struct MetricsSnapshot {
             std::printf("Latency ns min/avg/max: %llu/%.0f/%llu  samples=%llu\n",
                 (unsigned long long)minLatency, avg, (unsigned long long)maxLatency, (unsigned long long)latencyCount);
         }
-        std::printf("Drops=%llu Resync=%llu ConnErr=%llu NearCap=%llu HardWM=%llu\n",
+        std::printf("Drops=%llu Resync=%llu ConnErr=%llu QHighWater=%llu\n",
             (unsigned long long)messagesDropped, (unsigned long long)resyncEvents,
-            (unsigned long long)connectionErrors, (unsigned long long)bufferNearCapacityEvents,
-            (unsigned long long)hardWatermarkEvents);
+            (unsigned long long)connectionErrors, (unsigned long long)queueHighWater);
     }
 };
 
 static_assert(sizeof(HotMetrics) == CACHE_LINE_SIZE, 
               "HotMetrics must be exactly one cache line");
-// ColdMetrics grew beyond one cache line after adding hardWatermarkEvents; alignment retained for false sharing avoidance.
+static_assert(sizeof(ColdMetrics) == CACHE_LINE_SIZE, "ColdMetrics must be exactly one cache line");
 static_assert(alignof(HotMetrics) == CACHE_LINE_SIZE, 
               "HotMetrics must be cache-line aligned");
 static_assert(alignof(ColdMetrics) == CACHE_LINE_SIZE, 
@@ -235,67 +227,26 @@ static_assert(alignof(PerformanceMetrics) == CACHE_LINE_SIZE, "PerformanceMetric
 struct MetricsView {
     SystemMetrics* sys;
     explicit MetricsView(SystemMetrics* s) : sys(s) {}
-    // Thread-local batching accumulators
-    struct Local {
-        uint64_t messagesSent = 0;
-        uint64_t messagesReceived = 0;
-        uint64_t bytesReceived = 0;
-        uint64_t bytesSent = 0;
-        uint64_t ordersPlaced = 0;
-        uint64_t tradesProcessed = 0;
-        uint64_t quotesProcessed = 0;
-        uint64_t latencyTotal = 0;
-        uint64_t latencyCount = 0;
-        uint64_t latencyMin = UINT64_MAX;
-        uint64_t latencyMax = 0;
-        uint64_t flushCounter = 0;
-    };
-    static thread_local Local local;
-    static constexpr uint64_t FLUSH_THRESHOLD = 1024; // tune
-
-    inline void flush() noexcept {
-        if (local.messagesSent) sys->hot.messagesSent.fetch_add(local.messagesSent, std::memory_order_relaxed);
-        if (local.messagesReceived) sys->hot.messagesReceived.fetch_add(local.messagesReceived, std::memory_order_relaxed);
-        if (local.bytesReceived) sys->hot.bytesReceived.fetch_add(local.bytesReceived, std::memory_order_relaxed);
-        if (local.bytesSent) sys->hot.bytesSent.fetch_add(local.bytesSent, std::memory_order_relaxed);
-        if (local.ordersPlaced) sys->hot.ordersPlaced.fetch_add(local.ordersPlaced, std::memory_order_relaxed);
-        if (local.tradesProcessed) sys->hot.tradesProcessed.fetch_add(local.tradesProcessed, std::memory_order_relaxed);
-        if (local.quotesProcessed) sys->hot.quotesProcessed.fetch_add(local.quotesProcessed, std::memory_order_relaxed);
-        if (local.latencyCount) {
-            auto& perf = sys->perf;
-            uint64_t curMin = perf.minLatency.load(std::memory_order_relaxed);
-            if (local.latencyMin < curMin) perf.minLatency.store(local.latencyMin, std::memory_order_relaxed);
-            uint64_t curMax = perf.maxLatency.load(std::memory_order_relaxed);
-            if (local.latencyMax > curMax) perf.maxLatency.store(local.latencyMax, std::memory_order_relaxed);
-            perf.totalLatency.fetch_add(local.latencyTotal, std::memory_order_relaxed);
-            perf.latencyCount.fetch_add(local.latencyCount, std::memory_order_relaxed);
-        }
-        local = Local();
-    }
-
-    inline void incMessagesReceived() noexcept { local.messagesReceived++; if (++local.flushCounter >= FLUSH_THRESHOLD) { flush(); } }
-    inline void incMessagesSent() noexcept { local.messagesSent++; if (++local.flushCounter >= FLUSH_THRESHOLD) { flush(); } }
-    inline void addBytesReceived(uint64_t n) noexcept { local.bytesReceived += n; if (++local.flushCounter >= FLUSH_THRESHOLD) { flush(); } }
-    inline void addBytesSent(uint64_t n) noexcept { local.bytesSent += n; if (++local.flushCounter >= FLUSH_THRESHOLD) { flush(); } }
-    inline void incOrdersPlaced() noexcept { local.ordersPlaced++; if (++local.flushCounter >= FLUSH_THRESHOLD) { flush(); } }
-    inline void incTradesProcessed() noexcept { local.tradesProcessed++; if (++local.flushCounter >= FLUSH_THRESHOLD) { flush(); } }
-    inline void incQuotesProcessed() noexcept { local.quotesProcessed++; if (++local.flushCounter >= FLUSH_THRESHOLD) { flush(); } }
+    inline void incMessagesReceived() noexcept { sys->hot.messagesReceived.fetch_add(1, std::memory_order_relaxed); }
+    inline void incMessagesSent() noexcept { sys->hot.messagesSent.fetch_add(1, std::memory_order_relaxed); }
+    inline void addBytesReceived(uint64_t n) noexcept { sys->hot.bytesReceived.fetch_add(n, std::memory_order_relaxed); }
+    inline void addBytesSent(uint64_t n) noexcept { sys->hot.bytesSent.fetch_add(n, std::memory_order_relaxed); }
+    inline void incOrdersPlaced() noexcept { sys->hot.ordersPlaced.fetch_add(1, std::memory_order_relaxed); }
+    inline void incTradesProcessed() noexcept { sys->hot.tradesProcessed.fetch_add(1, std::memory_order_relaxed); }
+    inline void incQuotesProcessed() noexcept { sys->hot.quotesProcessed.fetch_add(1, std::memory_order_relaxed); }
     inline void incResyncEvents() noexcept { sys->perf.resyncEvents.fetch_add(1, std::memory_order_relaxed); }
     inline void updateLatency(uint64_t nanos) noexcept {
-        if (nanos < local.latencyMin) local.latencyMin = nanos;
-        if (nanos > local.latencyMax) local.latencyMax = nanos;
-        local.latencyTotal += nanos;
-        local.latencyCount += 1;
-        if (++local.flushCounter >= FLUSH_THRESHOLD) { flush(); }
+        auto& perf = sys->perf;
+        uint64_t curMin = perf.minLatency.load(std::memory_order_relaxed);
+        while (nanos < curMin && !perf.minLatency.compare_exchange_weak(curMin, nanos, std::memory_order_relaxed)) {}
+        uint64_t curMax = perf.maxLatency.load(std::memory_order_relaxed);
+        while (nanos > curMax && !perf.maxLatency.compare_exchange_weak(curMax, nanos, std::memory_order_relaxed)) {}
+        perf.totalLatency.fetch_add(nanos, std::memory_order_relaxed);
+        perf.latencyCount.fetch_add(1, std::memory_order_relaxed);
     }
 };
 
 extern SystemMetrics g_systemMetrics;
 extern MetricsView g_metricsView;
-
-// Flush thread-local metric batches for the calling thread into global atomics.
-// Only affects the current thread; invoke from each worker/loop periodically
-// or use the provided atexit hook to avoid losing low-frequency counters.
-void flushAllMetrics() noexcept;
 
 #endif // METRICS_H

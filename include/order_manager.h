@@ -22,13 +22,12 @@ public:
 
     struct OrderRecord {
         uint64_t timestamp;
-        char symbol[8];
+        std::string symbol;
         uint8_t side;
         uint32_t quantity;
         int32_t price;
-        static constexpr size_t REASON_MAX = 64;
-        char reason[REASON_MAX];
-    }; // POD, no dynamic allocations
+        std::string reason;
+    };
 
 private:
     std::string symbol;
@@ -74,14 +73,13 @@ public:
     uint64_t getQuoteCount() const noexcept { return totalQuotesProcessed; }
     uint64_t getTradeCount() const noexcept { return totalTradesProcessed; }
     uint64_t getOrderCount() const noexcept { return totalOrdersSent; }
-    // Legacy test compatibility alias
-    uint64_t getTotalOrdersSent() const noexcept { return totalOrdersSent; }
 
     std::vector<OrderRecord> getOrderHistory() const {
-        std::vector<OrderRecord> v;
-        v.reserve(orderHistory.size());
-        for (const auto& r : orderHistory) v.push_back(r);
-        return v;
+        std::vector<OrderRecord> history;
+        for (const auto& record : orderHistory) {
+            history.push_back(record);
+        }
+        return history;
     }
 
 private:

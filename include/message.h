@@ -12,8 +12,7 @@ struct MessageHeader {
     
     static constexpr uint8_t QUOTE_TYPE = 1;
     static constexpr uint8_t TRADE_TYPE = 2;
-    // Legacy tests reference ORDER_TYPE; map it to TRADE_TYPE placeholder (orders have no header on wire).
-    static constexpr uint8_t ORDER_TYPE = 3; // not used on wire, for tests only
+    // NO ORDER_TYPE - Orders are sent as 25 bytes without any header per spec
 };
 
 struct QuoteMessage {
@@ -39,8 +38,10 @@ struct OrderMessage {
     int32_t price;
     char side;
     char _padding[3];
-    static constexpr size_t SIZE = 25; // legacy wire size without padding
-    OrderMessage() noexcept { std::memset(this, 0, sizeof(*this)); }
+    
+    OrderMessage() noexcept {
+        std::memset(this, 0, sizeof(*this));
+    }
 };
 
 static_assert(sizeof(MessageHeader) == 2, "MessageHeader must be 2 bytes");

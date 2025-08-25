@@ -5,7 +5,7 @@
 #include <algorithm>
 #include "metrics.h"
 
-MessageBuffer::MessageBuffer() noexcept : head(0), tail(0), used(0), cachedNextSize(-1), watermarkState(SoftWatermarkState::NORMAL) {}
+MessageBuffer::MessageBuffer() noexcept : head(0), tail(0), used(0) {}
 
 bool MessageBuffer::append(const uint8_t* data, size_t len) noexcept {
     if (!len) return true;
@@ -16,26 +16,10 @@ bool MessageBuffer::append(const uint8_t* data, size_t len) noexcept {
     if (second) std::memcpy(buffer, data + first, second);
     tail = (tail + len) & (BUFFER_SIZE - 1);
     used += len;
-    if (used >= SOFT_WATERMARK && watermarkState == SoftWatermarkState::NORMAL) {
-        watermarkState = SoftWatermarkState::NEAR_CAPACITY;
-        g_systemMetrics.cold.bufferNearCapacityEvents.fetch_add(1, std::memory_order_relaxed);
-    }
-    if (cachedNextSize != -1 && used < static_cast<size_t>(cachedNextSize)) cachedNextSize = -1; // appended might complete
     return true;
 }
 
 MessageBuffer::ExtractResult MessageBuffer::peekMessage(MessageHeader& header, const uint8_t*& bodyPtr, size_t& contiguousBody) const noexcept {
-    if (cachedNextSize != -1) {
-        if (used < static_cast<size_t>(cachedNextSize)) return ExtractResult::NEED_MORE_DATA;
-        // reconstruct header
-        uint8_t len = buffer[head];
-        uint8_t type = buffer[(head + 1) & (BUFFER_SIZE - 1)];
-        header.length = len; header.type = type;
-        size_t bodyStart = (head + WireFormat::HEADER_SIZE) & (BUFFER_SIZE - 1);
-        bodyPtr = buffer + bodyStart;
-        contiguousBody = std::min(static_cast<size_t>(header.length), BUFFER_SIZE - bodyStart);
-        return ExtractResult::SUCCESS;
-    }
     if (used < WireFormat::HEADER_SIZE) return ExtractResult::NEED_MORE_DATA;
     uint8_t len = buffer[head];
     uint8_t type = buffer[(head + 1) & (BUFFER_SIZE - 1)];
@@ -43,7 +27,7 @@ MessageBuffer::ExtractResult MessageBuffer::peekMessage(MessageHeader& header, c
     header.type = type;
     if (!MessageParser::validateHeader(header)) return ExtractResult::INVALID_HEADER;
     size_t total = WireFormat::HEADER_SIZE + header.length;
-    if (used < total) { cachedNextSize = static_cast<int>(total); return ExtractResult::NEED_MORE_DATA; }
+    if (used < total) return ExtractResult::NEED_MORE_DATA;
     size_t bodyStart = (head + WireFormat::HEADER_SIZE) & (BUFFER_SIZE - 1);
     bodyPtr = buffer + bodyStart;
     contiguousBody = std::min(static_cast<size_t>(header.length), BUFFER_SIZE - bodyStart);
@@ -54,8 +38,6 @@ void MessageBuffer::consume(const MessageHeader& header) noexcept {
     size_t total = WireFormat::HEADER_SIZE + header.length;
     head = (head + total) & (BUFFER_SIZE - 1);
     used -= total;
-    cachedNextSize = -1; // invalidate cache for next message
-    if (used < SOFT_WATERMARK) watermarkState = SoftWatermarkState::NORMAL;
 }
 
 MessageBuffer::ExtractResult MessageBuffer::extractMessage(MessageHeader& header, uint8_t* messageBuffer) noexcept {
@@ -76,7 +58,7 @@ size_t MessageBuffer::availableBytes() const noexcept { return used; }
 
 size_t MessageBuffer::availableSpace() const noexcept { return BUFFER_SIZE - used; }
 
-void MessageBuffer::clear() noexcept { head = tail = used = 0; cachedNextSize = -1; watermarkState = SoftWatermarkState::NORMAL; }
+void MessageBuffer::clear() noexcept { head = tail = used = 0; }
 
 size_t MessageBuffer::resync() noexcept {
     size_t available = used;
