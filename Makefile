@@ -105,6 +105,8 @@ COMPREHENSIVE_TEST_SOURCES = $(TESTDIR)/test_comprehensive_runner.cpp \
 	$(TESTDIR)/test_network_resilience.cpp \
 	$(TESTDIR)/test_binary_protocol.cpp \
 	$(TESTDIR)/test_edge_cases.cpp \
+	$(TESTDIR)/test_vwap_delta_eviction.cpp \
+	$(TESTDIR)/test_symbol_intern.cpp \
 	$(TESTDIR)/test_performance.cpp \
 	$(TESTDIR)/test_stress.cpp
 
