@@ -157,97 +157,8 @@ public:
             return true;
         });
         
-        /*
-        runTest("Automatic Reconnection", [this](std::string& details) {
-            NetworkManager netManager;
-            
-            TestServer server(19003);
-            server.start();
-            
-            if (!netManager.connect("127.0.0.1", 19003)) {
-                details = "Initial connection failed";
-                return false;
-            }
-            
-            server.stop();
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            
-            TestServer server2(19003);
-            server2.start();
-            
-            int attempts = 0;
-            while (!netManager.isConnected() && attempts < 50) {
-                netManager.handleReconnection();
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                attempts++;
-            }
-            
-            if (!netManager.isConnected()) {
-                details = "Failed to reconnect after " + std::to_string(attempts) + " attempts";
-                return false;
-            }
-            
-            return true;
-        });
-        */
         
-        /*
-        runTest("Exponential Backoff", [this](std::string& details) {
-            NetworkManager netManager(5, 100, 2000); // 5 retries, 100ms initial, 2s max
-            
-            auto start = std::chrono::steady_clock::now();
-            
-            std::vector<long> retryDelays;
-            int attempts = 0;
-            
-            while (attempts < 4) {
-                auto attemptStart = std::chrono::steady_clock::now();
-                netManager.handleReconnection();
-                auto attemptEnd = std::chrono::steady_clock::now();
-                
-                long delayMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                    attemptEnd - attemptStart).count();
-                
-                if (attempts > 0) {
-                    retryDelays.push_back(delayMs);
-                }
-                attempts++;
-            }
-            
-            if (retryDelays.size() >= 2) {
-                for (size_t i = 1; i < retryDelays.size(); i++) {
-                    if (retryDelays[i] <= retryDelays[i-1]) {
-                        details = "Backoff delays should increase exponentially";
-                        return false;
-                    }
-                }
-            }
-            
-            return true;
-        });
-        */
         
-        /*
-        runTest("Maximum Retry Limit", [this](std::string& details) {
-            NetworkManager netManager(3, 50, 100); // 3 retries, very short delays
-            
-            netManager.connect("127.0.0.1", 19999);
-            
-            int reconnectAttempts = 0;
-            while (reconnectAttempts < 10) {
-                netManager.handleReconnection();
-                reconnectAttempts++;
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            }
-            
-            if (netManager.getReconnectAttempts() > 3) {
-                details = "Should stop after maximum retry limit";
-                return false;
-            }
-            
-            return true;
-        });
-        */
         
         runTest("Partial Message Handling", [this](std::string& details) {
             MessageBuffer buffer;
@@ -382,40 +293,6 @@ public:
             return true;
         });
         
-        /*
-        runTest("Connection State Tracking", [this](std::string& details) {
-            NetworkManager netManager(3, 100, 1000);
-            
-            if (netManager.isConnected()) {
-                details = "Should not be connected initially";
-                return false;
-            }
-            
-            TestServer server(19006);
-            server.start();
-            
-            netManager.connect("127.0.0.1", 19006);
-            std::this_thread::sleep_for(std::chrono::milliseconds(200));
-            
-            if (!netManager.isConnected()) {
-                details = "Should be connected after successful connect";
-                return false;
-            }
-            
-            server.stop();
-            std::this_thread::sleep_for(std::chrono::milliseconds(200));
-            
-            char data[] = "test";
-            netManager.sendData(data, sizeof(data));
-            
-            if (netManager.isConnected()) {
-                details = "Should detect disconnection after server stops";
-                return false;
-            }
-            
-            return true;
-        });
-        */
     }
 };
 

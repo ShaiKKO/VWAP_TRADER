@@ -235,7 +235,7 @@ public:
             MessageHeader* header = reinterpret_cast<MessageHeader*>(buffer);
             header->length = sizeof(QuoteMessage);
             header->type = MessageHeader::QUOTE_TYPE;
-            /* no reserved */
+            
             
             QuoteMessage* netQuote = reinterpret_cast<QuoteMessage*>(buffer + sizeof(MessageHeader));
             std::memcpy(netQuote->symbol, origQuote.symbol, 8);
