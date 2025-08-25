@@ -36,7 +36,7 @@ VwapCalculator::VwapCalculator(uint32_t windowSeconds) noexcept
 
 void VwapCalculator::addTrade(const TradeMessage& trade) noexcept {
 
-    if (trade.price < 0 || trade.quantity == 0) {
+    if (trade.price <= 0 || trade.quantity == 0) {
         ++rejectedTrades;
         return;
     }

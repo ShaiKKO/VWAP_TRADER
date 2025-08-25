@@ -96,13 +96,14 @@ bool MessageParser::validateHeader(const MessageHeader& header) noexcept {
 }
 
 bool MessageParser::validateQuote(const QuoteMessage& quote) noexcept {
-
+    if (quote.bidQuantity == 0 || quote.askQuantity == 0) return false;
     if (quote.askPrice < 0 || static_cast<int32_t>(quote.bidPrice) < 0) return false;
-    if (quote.bidQuantity && quote.askQuantity && quote.askPrice && static_cast<int32_t>(quote.bidPrice) > quote.askPrice) return false;
+    if (static_cast<int32_t>(quote.bidPrice) > quote.askPrice) return false;
     return true;
 }
 
 bool MessageParser::validateTrade(const TradeMessage& trade) noexcept {
+    if (trade.quantity == 0) return false;
     if (trade.price < 0) return false;
     return true;
 }
